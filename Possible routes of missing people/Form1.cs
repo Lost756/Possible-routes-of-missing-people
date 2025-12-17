@@ -19,10 +19,19 @@ namespace Possible_routes_of_missing_people
         private GMapOverlay mainOverlay;
         private PointLatLng lastClickPoint;
 
+        //Ключ Google API
+        private const string GoogleApiKey = "AIzaSyBxe9rdMky1a04mz6RWYMf1ZFgSv15lzm4";
         public Form1()
         {
             InitializeComponent();
             SetupMap();
+        }
+
+        private void InitializeComponent()
+        {
+            this.Text = "Поиск возможных маршрутов (Google Maps)";
+            this.Size = new Size(1000, 700);
+            this.StartPosition = FormStartPosition.CenterScreen;
         }
 
         private void SetupMap()
@@ -31,16 +40,40 @@ namespace Possible_routes_of_missing_people
             gMapControl1.Dock = DockStyle.Fill;
             this.Controls.Add(gMapControl1);
 
-            gMapControl1.MapProvider = GMapProviders.OpenStreetMap;
-            gMapControl1.Position = new PointLatLng(59.9391, 30.3158); // Санкт-Петербург
+            // Проверим, установлен ли API-ключ
+            if (string.IsNullOrEmpty(GoogleApiKey) || GoogleApiKey == "AIzaSyBxe9rdMky1a04mz6RWYMf1ZFgSv15lzm4")
+            {
+                MessageBox.Show("Пожалуйста, установите действительный Google Maps API-ключ в коде.", "Ошибка API-ключа", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                // Временно используем OSM или другой провайдер, если ключ не задан
+                gMapControl1.MapProvider = GMapProviders.GoogleMap; // Заглушка
+            }
+            else
+            {
+                if (GMapProviders.GoogleMap != null)
+                {
+                    gMapControl1.MapProvider = GMapProviders.GoogleMap;
+                }
+                else
+                {
+                    MessageBox.Show("GMapProviders.GoogleMapProvider недоступен в текущей версии GMap.NET или не поддерживается.", "Предупреждение", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    // Используем OSM как запасной вариант
+                    gMapControl1.MapProvider = GMapProviders.OpenStreetMap;
+                }
+            }
+
+            gMapControl1.Position = new PointLatLng(61.6764, 50.8099); // Сыктывкар
             gMapControl1.MinZoom = 0;
             gMapControl1.MaxZoom = 18;
-            gMapControl1.Manager.Mode = AccessMode.ServerOnly;
+
+            // Режим: сначала с сервера, потом кэш
+            gMapControl1.Manager.Mode = AccessMode.ServerAndCache;
 
             mainOverlay = new GMapOverlay("main");
             gMapControl1.Overlays.Add(mainOverlay);
 
-            // Правильное событие для клика по карте
+            // Правильный вызов ZoomAndCenterMarkers
+            gMapControl1.ZoomAndCenterMarkers(mainOverlay.Id);
+
             gMapControl1.MouseClick += OnMapMouseClick;
         }
 
@@ -63,9 +96,10 @@ namespace Possible_routes_of_missing_people
                 marker.ToolTipText = "Место пропажи";
                 mainOverlay.Markers.Add(marker);
 
-                // Определяем границы области 500x500 метров
-                double latOffset = 0.00045; // ~50 метров (для теста)
-                double lngOffset = 0.00060; // ~50 метров
+                // Определяем границы области 1000x1000 метров (1 км)
+                double latOffset = 1000.0 / 111120.0; // ~1 км в градусах широты
+                // Долгота зависит от широты
+                double lngOffset = 1000.0 / (111120.0 * Math.Cos(point.Lat * Math.PI / 180)); // ~1 км в градусах долготы
 
                 var topLeft = new PointLatLng(point.Lat + latOffset, point.Lng - lngOffset);
                 var topRight = new PointLatLng(point.Lat + latOffset, point.Lng + lngOffset);
@@ -82,7 +116,7 @@ namespace Possible_routes_of_missing_people
                 polygon.Fill = new SolidBrush(Color.FromArgb(50, Color.LightBlue));
                 mainOverlay.Polygons.Add(polygon);
 
-                // Загружаем данные OSM для области
+                // Загружаем данные OSM для области через Overpass API (для POI)
                 await LoadOSMData(topLeft, bottomRight);
             }
         }
@@ -146,20 +180,8 @@ namespace Possible_routes_of_missing_people
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Ошибка загрузки OSM: {ex.Message}");
+                MessageBox.Show($"Ошибка загрузки OSM (для POI): {ex.Message}");
             }
-        }
-
-        private void InitializeComponent()
-        {
-            this.SuspendLayout();
-            // 
-            // Form1
-            // 
-            this.ClientSize = new System.Drawing.Size(1035, 546);
-            this.Name = "Form1";
-            this.ResumeLayout(false);
-
         }
     }
 }
