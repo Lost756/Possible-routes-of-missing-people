@@ -43,7 +43,6 @@ namespace Possible_routes_of_missing_people
             // Проверим, установлен ли API-ключ
             if (string.IsNullOrEmpty(GoogleApiKey) || GoogleApiKey == "AIzaSyBxe9rdMky1a04mz6RWYMf1ZFgSv15lzm4")
             {
-                MessageBox.Show("Пожалуйста, установите действительный Google Maps API-ключ в коде.", "Ошибка API-ключа", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 // Временно используем OSM или другой провайдер, если ключ не задан
                 gMapControl1.MapProvider = GMapProviders.GoogleMap; // Заглушка
             }
