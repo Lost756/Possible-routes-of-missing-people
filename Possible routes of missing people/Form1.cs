@@ -17,7 +17,6 @@ namespace Possible_routes_of_missing_people
     {
         private GMapControl gMapControl1;
         private GMapOverlay mainOverlay;
-        private PointLatLng lastClickPoint;
         private RouteFinder routeFinder;
 
         //Ключ Google API
@@ -91,8 +90,6 @@ namespace Possible_routes_of_missing_people
                 // Преобразуем координаты клика в PointLatLng
                 PointLatLng point = gMapControl1.FromLocalToLatLng(e.X, e.Y);
 
-                lastClickPoint = point;
-
                 // Очищаем предыдущие маркеры и полигоны
                 mainOverlay.Markers.Clear();
                 mainOverlay.Polygons.Clear();
@@ -112,6 +109,9 @@ namespace Possible_routes_of_missing_people
         {
             try
             {
+                // Показываем прогресс
+                Cursor = Cursors.WaitCursor;
+
                 // Используем RouteFinder для получения возможных маршрутов
                 var routes = await routeFinder.FindRoutesFromPointAsync(startPoint, 1000, 3);
 
@@ -119,42 +119,166 @@ namespace Possible_routes_of_missing_people
                 DisplayRoutesOnMap(routes);
 
                 // Загружаем POI (точки интереса) в радиусе
-                await LoadPOI(startPoint);
+                await LoadPOIAsync(startPoint);
+
+                // Автоматически приближаем карту к области
+                ZoomToArea(startPoint, 1000);
             }
             catch (Exception ex)
             {
                 MessageBox.Show($"Ошибка при поиске маршрутов: {ex.Message}", "Ошибка",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
+            finally
+            {
+                Cursor = Cursors.Default;
+            }
         }
 
         private void DisplayRoutesOnMap(List<GMapRoute> routes)
         {
+            if (routes == null || routes.Count == 0)
+            {
+                MessageBox.Show("Не удалось построить маршруты. Возможно, в этом районе нет дорог.",
+                    "Информация", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
             foreach (var route in routes)
             {
-                route.Stroke = new Pen(Color.Green, 3);
+                // Разные цвета для разных маршрутов
+                var colors = new[] { Color.Green, Color.Blue, Color.Orange, Color.Purple, Color.Red };
+                int colorIndex = mainOverlay.Routes.Count % colors.Length;
+
+                route.Stroke = new Pen(colors[colorIndex], 3);
                 route.Stroke.DashStyle = System.Drawing.Drawing2D.DashStyle.Dash;
                 mainOverlay.Routes.Add(route);
             }
         }
 
-        private async Task LoadPOI(PointLatLng centerPoint)
+        private async Task LoadPOIAsync(PointLatLng centerPoint)
         {
-            // Определяем границы области 1000x1000 метров (1 км)
-            double latOffset = 1000.0 / 111120.0;
-            double lngOffset = 1000.0 / (111120.0 * Math.Cos(centerPoint.Lat * Math.PI / 180));
-
-            var topLeft = new PointLatLng(centerPoint.Lat + latOffset, centerPoint.Lng - lngOffset);
-            var bottomRight = new PointLatLng(centerPoint.Lat - latOffset, centerPoint.Lng + lngOffset);
-
-            // Загружаем POI через RouteFinder
-            var pois = await routeFinder.GetNearbyPOIAsync(centerPoint, 1000);
-
-            foreach (var poi in pois)
+            try
             {
-                var marker = new GMarkerGoogle(poi.Location, GMarkerGoogleType.blue_small);
-                marker.ToolTipText = $"{poi.Name} ({poi.Type})";
-                mainOverlay.Markers.Add(marker);
+                // Определяем границы области 1000x1000 метров (1 км)
+                double latOffset = 1000.0 / 111120.0;
+                double lngOffset = 1000.0 / (111120.0 * Math.Cos(centerPoint.Lat * Math.PI / 180));
+
+                var south = centerPoint.Lat - latOffset;
+                var north = centerPoint.Lat + latOffset;
+                var west = centerPoint.Lng - lngOffset;
+                var east = centerPoint.Lng + lngOffset;
+
+                string overpassQuery = $@"
+                    [out:json];
+                    (
+                      node[""amenity""]({south},{west},{north},{east});
+                      node[""shop""]({south},{west},{north},{east});
+                      node[""tourism""]({south},{west},{north},{east});
+                      node[""building""=""yes""]({south},{west},{north},{east});
+                    );
+                    out;";
+
+                var url = $"http://overpass-api.de/api/interpreter?data={Uri.EscapeDataString(overpassQuery)}";
+
+                // Используем HttpClient с таймаутом
+                using var client = new HttpClient();
+                client.Timeout = TimeSpan.FromSeconds(10);
+
+                var response = await client.GetStringAsync(url);
+                var json = JObject.Parse(response);
+                var elements = (JArray)json["elements"];
+
+                int poiCount = 0;
+                foreach (var element in elements)
+                {
+                    var type = element["type"]?.ToString();
+                    var tags = element["tags"] as JObject;
+
+                    if (tags == null || type != "node") continue;
+
+                    var name = tags["name"]?.ToString() ?? "Без названия";
+                    var amenity = tags["amenity"]?.ToString() ??
+                                 tags["shop"]?.ToString() ??
+                                 tags["tourism"]?.ToString() ??
+                                 "Объект";
+
+                    var lat = (double)element["lat"];
+                    var lon = (double)element["lon"];
+                    var point = new PointLatLng(lat, lon);
+
+                    // Выбираем иконку в зависимости от типа POI
+                    var markerType = GetMarkerTypeForPOI(amenity);
+                    var marker = new GMarkerGoogle(point, markerType);
+                    marker.ToolTipText = $"{name} ({amenity})";
+                    mainOverlay.Markers.Add(marker);
+
+                    poiCount++;
+
+                    // Ограничиваем количество POI для производительности
+                    if (poiCount >= 50) break;
+                }
+
+                Console.WriteLine($"Загружено {poiCount} POI");
+            }
+            catch (HttpRequestException httpEx)
+            {
+                Console.WriteLine($"Сетевая ошибка при загрузке POI: {httpEx.Message}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Ошибка загрузки POI: {ex.Message}");
+            }
+        }
+
+        private GMarkerGoogleType GetMarkerTypeForPOI(string poiType)
+        {
+            if (poiType.Contains("hospital") || poiType.Contains("clinic"))
+                return GMarkerGoogleType.red_dot;
+            if (poiType.Contains("shop") || poiType.Contains("market"))
+                return GMarkerGoogleType.orange_dot;
+            if (poiType.Contains("restaurant") || poiType.Contains("cafe"))
+                return GMarkerGoogleType.yellow_dot;
+            if (poiType.Contains("police") || poiType.Contains("fire"))
+                return GMarkerGoogleType.blue_dot;
+            if (poiType.Contains("school") || poiType.Contains("university"))
+                return GMarkerGoogleType.purple_dot;
+
+            return GMarkerGoogleType.green_dot;
+        }
+
+        private void ZoomToArea(PointLatLng center, double radiusMeters)
+        {
+            try
+            {
+                double latOffset = radiusMeters / 111120.0;
+                double lngOffset = radiusMeters / (111120.0 * Math.Cos(center.Lat * Math.PI / 180));
+
+                // Создаем прямоугольную область для зума
+                var north = center.Lat + latOffset;
+                var south = center.Lat - latOffset;
+                var east = center.Lng + lngOffset;
+                var west = center.Lng - lngOffset;
+
+                // Создаем RectLatLng (северо-западный и юго-восточный углы)
+                var rect = new RectLatLng(north, west, east - west, north - south);
+
+                // Устанавливаем зум и центрируем карту
+                gMapControl1.SetZoomToFitRect(rect);
+
+                // Дополнительно центрируем на начальной точке
+                gMapControl1.Position = center;
+
+                // Устанавливаем подходящий зум
+                if (gMapControl1.Zoom < 15)
+                    gMapControl1.Zoom = 15;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Ошибка при зуммировании: {ex.Message}");
+                // Просто центрируем на точке
+                gMapControl1.Position = center;
+                gMapControl1.Zoom = 16;
             }
         }
     }
