@@ -18,13 +18,16 @@ namespace Possible_routes_of_missing_people
         private GMapControl gMapControl1;
         private GMapOverlay mainOverlay;
         private PointLatLng lastClickPoint;
+        private RouteFinder routeFinder;
 
         //Ключ Google API
         private const string GoogleApiKey = "AIzaSyBxe9rdMky1a04mz6RWYMf1ZFgSv15lzm4";
+
         public Form1()
         {
             InitializeComponent();
             SetupMap();
+            InitializeRouteFinder();
         }
 
         private void InitializeComponent()
@@ -32,6 +35,11 @@ namespace Possible_routes_of_missing_people
             this.Text = "Поиск возможных маршрутов (Google Maps)";
             this.Size = new Size(1000, 700);
             this.StartPosition = FormStartPosition.CenterScreen;
+        }
+
+        private void InitializeRouteFinder()
+        {
+            routeFinder = new RouteFinder(GoogleApiKey);
         }
 
         private void SetupMap()
@@ -95,91 +103,58 @@ namespace Possible_routes_of_missing_people
                 marker.ToolTipText = "Место пропажи";
                 mainOverlay.Markers.Add(marker);
 
-                // Определяем границы области 1000x1000 метров (1 км)
-                double latOffset = 1000.0 / 111120.0; // ~1 км в градусах широты
-                // Долгота зависит от широты
-                double lngOffset = 1000.0 / (111120.0 * Math.Cos(point.Lat * Math.PI / 180)); // ~1 км в градусах долготы
-
-                var topLeft = new PointLatLng(point.Lat + latOffset, point.Lng - lngOffset);
-                var topRight = new PointLatLng(point.Lat + latOffset, point.Lng + lngOffset);
-                var bottomRight = new PointLatLng(point.Lat - latOffset, point.Lng + lngOffset);
-                var bottomLeft = new PointLatLng(point.Lat - latOffset, point.Lng - lngOffset);
-
-                var rectPoints = new List<PointLatLng>
-                {
-                    topLeft, topRight, bottomRight, bottomLeft, topLeft
-                };
-
-                var polygon = new GMapPolygon(rectPoints, "area");
-                polygon.Stroke = new Pen(Color.Blue, 2);
-                polygon.Fill = new SolidBrush(Color.FromArgb(50, Color.LightBlue));
-                mainOverlay.Polygons.Add(polygon);
-
-                // Загружаем данные OSM для области через Overpass API (для POI)
-                await LoadOSMData(topLeft, bottomRight);
+                // Вызываем метод поиска маршрутов
+                await FindPossibleRoutes(point);
             }
         }
 
-        private async Task LoadOSMData(PointLatLng topLeft, PointLatLng bottomRight)
+        private async Task FindPossibleRoutes(PointLatLng startPoint)
         {
             try
             {
-                var minLat = bottomRight.Lat;
-                var maxLat = topLeft.Lat;
-                var minLon = topLeft.Lng;
-                var maxLon = bottomRight.Lng;
+                // Используем RouteFinder для получения возможных маршрутов
+                var routes = await routeFinder.FindRoutesFromPointAsync(startPoint, 1000, 3);
 
-                string overpassQuery = $@"
-                    [out:json];
-                    (
-                      node[""amenity""]({minLat},{minLon},{maxLat},{maxLon});
-                      way[""highway""]({minLat},{minLon},{maxLat},{maxLon});
-                      way[""building""]({minLat},{minLon},{maxLat},{maxLon});
-                    );
-                    out geom;";
+                // Отображаем полученные маршруты на карте
+                DisplayRoutesOnMap(routes);
 
-                var url = $"http://overpass-api.de/api/interpreter?data={Uri.EscapeDataString(overpassQuery)}";
-                using var client = new HttpClient();
-                var response = await client.GetStringAsync(url);
-                var json = JObject.Parse(response);
-                var elements = (JArray)json["elements"];
-
-                foreach (var element in elements)
-                {
-                    var type = element["type"]?.ToString();
-                    var tags = element["tags"];
-                    if (tags == null) continue;
-
-                    var name = tags["name"]?.ToString() ?? "Без названия";
-                    var amenity = tags["amenity"]?.ToString();
-                    var highway = tags["highway"]?.ToString();
-                    var building = tags["building"]?.ToString();
-
-                    if (type == "node")
-                    {
-                        var lat = (double)element["lat"];
-                        var lon = (double)element["lon"];
-                        var point = new PointLatLng(lat, lon);
-
-                        var marker = new GMarkerGoogle(point, GMarkerGoogleType.red_small);
-                        marker.ToolTipText = $"{name} ({amenity})";
-                        mainOverlay.Markers.Add(marker);
-                    }
-                    else if (type == "way")
-                    {
-                        var coordinates = element["geometry"]
-                            .Select(x => new PointLatLng((double)x["lat"], (double)x["lon"]))
-                            .ToList();
-
-                        var route = new GMapRoute(coordinates, name);
-                        route.Stroke = new Pen(Color.Red, 2);
-                        mainOverlay.Routes.Add(route);
-                    }
-                }
+                // Загружаем POI (точки интереса) в радиусе
+                await LoadPOI(startPoint);
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Ошибка загрузки OSM (для POI): {ex.Message}");
+                MessageBox.Show($"Ошибка при поиске маршрутов: {ex.Message}", "Ошибка",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void DisplayRoutesOnMap(List<GMapRoute> routes)
+        {
+            foreach (var route in routes)
+            {
+                route.Stroke = new Pen(Color.Green, 3);
+                route.Stroke.DashStyle = System.Drawing.Drawing2D.DashStyle.Dash;
+                mainOverlay.Routes.Add(route);
+            }
+        }
+
+        private async Task LoadPOI(PointLatLng centerPoint)
+        {
+            // Определяем границы области 1000x1000 метров (1 км)
+            double latOffset = 1000.0 / 111120.0;
+            double lngOffset = 1000.0 / (111120.0 * Math.Cos(centerPoint.Lat * Math.PI / 180));
+
+            var topLeft = new PointLatLng(centerPoint.Lat + latOffset, centerPoint.Lng - lngOffset);
+            var bottomRight = new PointLatLng(centerPoint.Lat - latOffset, centerPoint.Lng + lngOffset);
+
+            // Загружаем POI через RouteFinder
+            var pois = await routeFinder.GetNearbyPOIAsync(centerPoint, 1000);
+
+            foreach (var poi in pois)
+            {
+                var marker = new GMarkerGoogle(poi.Location, GMarkerGoogleType.blue_small);
+                marker.ToolTipText = $"{poi.Name} ({poi.Type})";
+                mainOverlay.Markers.Add(marker);
             }
         }
     }
