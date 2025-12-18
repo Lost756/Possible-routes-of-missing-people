@@ -21,26 +21,22 @@ namespace Possible_routes_of_missing_people
 
         //Ключ Google API
         private const string GoogleApiKey = "AIzaSyBxe9rdMky1a04mz6RWYMf1ZFgSv15lzm4";
-
         public Form1()
         {
             InitializeComponent();
             SetupMap();
             InitializeRouteFinder();
         }
-
         private void InitializeComponent()
         {
             this.Text = "Поиск возможных маршрутов (Google Maps)";
             this.Size = new Size(1000, 700);
             this.StartPosition = FormStartPosition.CenterScreen;
         }
-
         private void InitializeRouteFinder()
         {
-            routeFinder = new RouteFinder(GoogleApiKey);
+            routeFinder = new RouteFinder();
         }
-
         private void SetupMap()
         {
             gMapControl1 = new GMapControl();
@@ -82,13 +78,16 @@ namespace Possible_routes_of_missing_people
 
             gMapControl1.MouseClick += OnMapMouseClick;
         }
-
         private async void OnMapMouseClick(object sender, MouseEventArgs e)
         {
             if (e.Button == MouseButtons.Left)
             {
+                Console.WriteLine("\n=== Клик на карте ===");
+
                 // Преобразуем координаты клика в PointLatLng
                 PointLatLng point = gMapControl1.FromLocalToLatLng(e.X, e.Y);
+
+                Console.WriteLine($"Координаты клика: {point.Lat:F6}, {point.Lng:F6}");
 
                 // Очищаем предыдущие маркеры и полигоны
                 mainOverlay.Markers.Clear();
@@ -104,12 +103,10 @@ namespace Possible_routes_of_missing_people
                 await FindPossibleRoutes(point);
             }
         }
-
         private async Task FindPossibleRoutes(PointLatLng startPoint)
         {
             try
             {
-                // Показываем прогресс
                 Cursor = Cursors.WaitCursor;
 
                 // Используем RouteFinder для получения возможных маршрутов
@@ -117,9 +114,6 @@ namespace Possible_routes_of_missing_people
 
                 // Отображаем полученные маршруты на карте
                 DisplayRoutesOnMap(routes);
-
-                // Загружаем POI (точки интереса) в радиусе
-                await LoadPOIAsync(startPoint);
 
                 // Автоматически приближаем карту к области
                 ZoomToArea(startPoint, 1000);
@@ -134,7 +128,6 @@ namespace Possible_routes_of_missing_people
                 Cursor = Cursors.Default;
             }
         }
-
         private void DisplayRoutesOnMap(List<GMapRoute> routes)
         {
             if (routes == null || routes.Count == 0)
@@ -155,98 +148,6 @@ namespace Possible_routes_of_missing_people
                 mainOverlay.Routes.Add(route);
             }
         }
-
-        private async Task LoadPOIAsync(PointLatLng centerPoint)
-        {
-            try
-            {
-                // Определяем границы области 1000x1000 метров (1 км)
-                double latOffset = 1000.0 / 111120.0;
-                double lngOffset = 1000.0 / (111120.0 * Math.Cos(centerPoint.Lat * Math.PI / 180));
-
-                var south = centerPoint.Lat - latOffset;
-                var north = centerPoint.Lat + latOffset;
-                var west = centerPoint.Lng - lngOffset;
-                var east = centerPoint.Lng + lngOffset;
-
-                string overpassQuery = $@"
-                    [out:json];
-                    (
-                      node[""amenity""]({south},{west},{north},{east});
-                      node[""shop""]({south},{west},{north},{east});
-                      node[""tourism""]({south},{west},{north},{east});
-                      node[""building""=""yes""]({south},{west},{north},{east});
-                    );
-                    out;";
-
-                var url = $"http://overpass-api.de/api/interpreter?data={Uri.EscapeDataString(overpassQuery)}";
-
-                // Используем HttpClient с таймаутом
-                using var client = new HttpClient();
-                client.Timeout = TimeSpan.FromSeconds(10);
-
-                var response = await client.GetStringAsync(url);
-                var json = JObject.Parse(response);
-                var elements = (JArray)json["elements"];
-
-                int poiCount = 0;
-                foreach (var element in elements)
-                {
-                    var type = element["type"]?.ToString();
-                    var tags = element["tags"] as JObject;
-
-                    if (tags == null || type != "node") continue;
-
-                    var name = tags["name"]?.ToString() ?? "Без названия";
-                    var amenity = tags["amenity"]?.ToString() ??
-                                 tags["shop"]?.ToString() ??
-                                 tags["tourism"]?.ToString() ??
-                                 "Объект";
-
-                    var lat = (double)element["lat"];
-                    var lon = (double)element["lon"];
-                    var point = new PointLatLng(lat, lon);
-
-                    // Выбираем иконку в зависимости от типа POI
-                    var markerType = GetMarkerTypeForPOI(amenity);
-                    var marker = new GMarkerGoogle(point, markerType);
-                    marker.ToolTipText = $"{name} ({amenity})";
-                    mainOverlay.Markers.Add(marker);
-
-                    poiCount++;
-
-                    // Ограничиваем количество POI для производительности
-                    if (poiCount >= 50) break;
-                }
-
-                Console.WriteLine($"Загружено {poiCount} POI");
-            }
-            catch (HttpRequestException httpEx)
-            {
-                Console.WriteLine($"Сетевая ошибка при загрузке POI: {httpEx.Message}");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Ошибка загрузки POI: {ex.Message}");
-            }
-        }
-
-        private GMarkerGoogleType GetMarkerTypeForPOI(string poiType)
-        {
-            if (poiType.Contains("hospital") || poiType.Contains("clinic"))
-                return GMarkerGoogleType.red_dot;
-            if (poiType.Contains("shop") || poiType.Contains("market"))
-                return GMarkerGoogleType.orange_dot;
-            if (poiType.Contains("restaurant") || poiType.Contains("cafe"))
-                return GMarkerGoogleType.yellow_dot;
-            if (poiType.Contains("police") || poiType.Contains("fire"))
-                return GMarkerGoogleType.blue_dot;
-            if (poiType.Contains("school") || poiType.Contains("university"))
-                return GMarkerGoogleType.purple_dot;
-
-            return GMarkerGoogleType.green_dot;
-        }
-
         private void ZoomToArea(PointLatLng center, double radiusMeters)
         {
             try
