@@ -17,7 +17,6 @@ namespace Possible_routes_of_missing_people
         public PointLatLng Location { get; set; }
         public double Distance { get; set; }
     }
-
     public class RouteFinder
     {
         private readonly HttpClient _httpClient;
@@ -37,19 +36,19 @@ namespace Possible_routes_of_missing_people
 
             Console.WriteLine($"=== FindRoutesFromPointAsync начат ===");
             Console.WriteLine($"Стартовая точка: {startPoint.Lat:F6}, {startPoint.Lng:F6}");
+            Console.WriteLine($"Радиус поиска: {radiusMeters} м");
 
             try
             {
-                // 1. Ищем ближайшие точки интереса
-                var pois = await GetNearbyPOIAsync(startPoint, radiusMeters);
+                // 1. Ищем ближайшие точки интереса (магазины)
+                var pois = await GetNearbyShopsAsync(startPoint, radiusMeters);
 
-                Console.WriteLine($"Из GetNearbyPOIAsync получено POI: {pois.Count}");
+                Console.WriteLine($"Найдено магазинов: {pois.Count}");
 
-                // 2. Сортируем по важности и расстоянию
+                // 2. Сортируем по расстоянию
                 var sortedPOIs = pois
-                    .OrderBy(p => GetPOIPriority(p.Type)) // Сначала более важные
-                    .ThenBy(p => p.Distance)              // Потом ближайшие
-                    .Take(maxRoutes)                     // Берем максимум маршрутов
+                    .OrderBy(p => p.Distance)
+                    .Take(maxRoutes)
                     .ToList();
 
                 Console.WriteLine($"Отобрано для маршрутов: {sortedPOIs.Count}");
@@ -58,15 +57,15 @@ namespace Possible_routes_of_missing_people
                 foreach (var poi in sortedPOIs)
                 {
                     var route = CreateDirectRoute(startPoint, poi.Location);
-                    route.Name = $"К {poi.Name} ({poi.Type})";
+                    route.Name = $"В магазин: {poi.Name}";
                     routes.Add(route);
-                    Console.WriteLine($"Создан маршрут к: {poi.Name} ({poi.Type}), расстояние: {poi.Distance:F0}м");
+                    Console.WriteLine($"Создан маршрут к: {poi.Name}, расстояние: {poi.Distance:F0}м");
                 }
 
-                // 4. Если не нашли достаточно POI, добавляем направления
+                // 4. Если не нашли достаточно магазинов, добавляем направления
                 if (routes.Count < maxRoutes)
                 {
-                    Console.WriteLine($"Недостаточно POI ({routes.Count}/{maxRoutes}). Добавляем направления...");
+                    Console.WriteLine($"Недостаточно магазинов ({routes.Count}/{maxRoutes}). Добавляем направления...");
                     var additionalRoutes = CreateDirectionRoutes(startPoint, radiusMeters, maxRoutes - routes.Count);
                     routes.AddRange(additionalRoutes);
 
@@ -90,117 +89,158 @@ namespace Possible_routes_of_missing_people
             return routes;
         }
         /// <summary>
-        /// Ищет точки интереса поблизости
+        /// Ищет магазины поблизости (оригинальный рабочий запрос)
         /// </summary>
-        private async Task<List<POI>> GetNearbyPOIAsync(PointLatLng center, int radiusMeters)
+        private async Task<List<POI>> GetNearbyShopsAsync(PointLatLng center, int radiusMeters)
         {
             var pois = new List<POI>();
 
-            radiusMeters = 500;
-
-            double latOffset = radiusMeters / 111120.0;
-            double lngOffset = radiusMeters / (111120.0 * Math.Cos(center.Lat * Math.PI / 180));
-
-            var south = center.Lat - latOffset;
-            var north = center.Lat + latOffset;
-            var west = center.Lng - lngOffset;
-            var east = center.Lng + lngOffset;
-
-            Console.WriteLine($"=== GetNearbyPOIAsync начат ===");
+            Console.WriteLine($"=== GetNearbyShopsAsync начат ===");
             Console.WriteLine($"Центр: {center.Lat:F6}, {center.Lng:F6}");
-            Console.WriteLine($"Область: {south:F6}, {west:F6}, {north:F6}, {east:F6}");
+            Console.WriteLine($"Запрошенный радиус: {radiusMeters} м");
+
+            // Ограничиваем радиус для Overpass API (максимум 2 км для надежности)
+            int searchRadius = Math.Min(radiusMeters, 2000);
+            Console.WriteLine($"Фактический радиус поиска: {searchRadius} м");
 
             try
             {
-                string overpassQuery = $"[out:json];node[\"shop\"]({south.ToString(System.Globalization.CultureInfo.InvariantCulture)},{west.ToString(System.Globalization.CultureInfo.InvariantCulture)},{north.ToString(System.Globalization.CultureInfo.InvariantCulture)},{east.ToString(System.Globalization.CultureInfo.InvariantCulture)});out;";
+                // Рассчитываем границы поиска
+                double latOffset = searchRadius / 111120.0;
+                double lngOffset = searchRadius / (111120.0 * Math.Cos(center.Lat * Math.PI / 180));
+
+                var south = center.Lat - latOffset;
+                var north = center.Lat + latOffset;
+                var west = center.Lng - lngOffset;
+                var east = center.Lng + lngOffset;
+
+                Console.WriteLine($"Область поиска: {south:F6}, {west:F6}, {north:F6}, {east:F6}");
+
+                string overpassQuery = $"[out:json];" +
+                    $"node[\"shop\"]({south.ToString(System.Globalization.CultureInfo.InvariantCulture)}," +
+                    $"{west.ToString(System.Globalization.CultureInfo.InvariantCulture)}," +
+                    $"{north.ToString(System.Globalization.CultureInfo.InvariantCulture)}," +
+                    $"{east.ToString(System.Globalization.CultureInfo.InvariantCulture)});" +
+                    $"out;";
 
                 Console.WriteLine($"Запрос: {overpassQuery}");
 
-                var url = $"https://maps.mail.ru/osm/tools/overpass/api/interpreter?data={Uri.EscapeDataString(overpassQuery)}";
-
-                var response = await _httpClient.GetStringAsync(url);
-                Console.WriteLine($"Получен ответ, длина: {response.Length} символов");
-
-                // Проверяем начало ответа
-                if (response.Length > 50)
+                // Пробуем разные Overpass API серверы
+                var servers = new[]
                 {
-                    Console.WriteLine($"Начало ответа: {response.Substring(0, 50)}...");
-                }
+                    "https://overpass-api.de/api/interpreter",  // Основной сервер
+                    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",  // Резервный
+                    "https://lz4.overpass-api.de/api/interpreter"  // Быстрый сервер
+                };
 
-                var json = JObject.Parse(response);
-                var elements = (JArray)json["elements"];
-
-                Console.WriteLine($"Найдено элементов: {elements?.Count ?? 0}");
-
-                if (elements != null && elements.Count > 0)
+                foreach (var server in servers)
                 {
-                    foreach (var element in elements)
+                    try
                     {
-                        var type = element["type"]?.ToString();
-                        if (type != "node") continue;
+                        Console.WriteLine($"Пробуем сервер: {server}");
+                        var url = $"{server}?data={Uri.EscapeDataString(overpassQuery)}";
 
-                        var tags = element["tags"] as JObject;
-                        if (tags == null) continue;
+                        var response = await _httpClient.GetStringAsync(url);
+                        Console.WriteLine($"Ответ получен, длина: {response.Length} символов");
 
-                        string name = tags["name"]?.ToString() ?? "Без названия";
-                        string shopType = tags["shop"]?.ToString() ?? "магазин";
-
-                        var location = new PointLatLng(
-                            (double)element["lat"],
-                            (double)element["lon"]
-                        );
-
-                        var distance = CalculateDistance(center, location);
-
-                        pois.Add(new POI
+                        if (string.IsNullOrEmpty(response) || response.Contains("error"))
                         {
-                            Name = name,
-                            Type = $"Магазин ({shopType})",
-                            Location = location,
-                            Distance = Math.Round(distance)
-                        });
+                            Console.WriteLine($"Сервер {server} вернул ошибку или пустой ответ");
+                            continue;
+                        }
 
-                        Console.WriteLine($"  ✓ {name} - {shopType} ({distance:F0}м)");
+                        if (response.Length > 100)
+                        {
+                            Console.WriteLine($"Начало ответа: {response.Substring(0, Math.Min(100, response.Length))}...");
+                        }
+
+                        var json = JObject.Parse(response);
+                        var elements = (JArray)json["elements"];
+
+                        Console.WriteLine($"Найдено элементов: {elements?.Count ?? 0}");
+
+                        if (elements != null && elements.Count > 0)
+                        {
+                            foreach (var element in elements)
+                            {
+                                try
+                                {
+                                    var type = element["type"]?.ToString();
+                                    if (type != "node") continue;
+
+                                    var tags = element["tags"] as JObject;
+                                    if (tags == null) continue;
+
+                                    string name = tags["name"]?.ToString() ?? "Магазин без названия";
+                                    string shopType = tags["shop"]?.ToString() ?? "магазин";
+
+                                    // Получаем координаты
+                                    var lat = (double?)element["lat"] ?? 0;
+                                    var lon = (double?)element["lon"] ?? 0;
+
+                                    if (lat == 0 || lon == 0) continue;
+
+                                    var location = new PointLatLng(lat, lon);
+                                    var distance = CalculateDistance(center, location);
+
+                                    // Фильтруем по реальному расстоянию
+                                    if (distance <= searchRadius)
+                                    {
+                                        pois.Add(new POI
+                                        {
+                                            Name = name,
+                                            Type = $"Магазин ({shopType})",
+                                            Location = location,
+                                            Distance = Math.Round(distance)
+                                        });
+
+                                        Console.WriteLine($"  ✓ {name} - {shopType} ({distance:F0}м)");
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    Console.WriteLine($"Ошибка обработки элемента: {ex.Message}");
+                                    continue;
+                                }
+                            }
+
+                            if (pois.Count > 0)
+                            {
+                                Console.WriteLine($"Успешно использован сервер: {server}");
+                                break;
+                            }
+                        }
+                        else
+                        {
+                            Console.WriteLine($"На сервере {server} в этой области нет магазинов.");
+                        }
+                    }
+                    catch (HttpRequestException)
+                    {
+                        Console.WriteLine($"Сервер {server} недоступен");
+                        continue;
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Ошибка с сервером {server}: {ex.Message}");
+                        continue;
                     }
                 }
-                else
+
+                if (pois.Count == 0)
                 {
-                    Console.WriteLine($"В этой области нет магазинов. Попробуйте кликнуть в центре города.");
+                    Console.WriteLine($"Все серверы вернули пустой результат или произошла ошибка.");
+                    Console.WriteLine($"Попробуйте кликнуть в районе с магазинами (центр города).");
                 }
-            }
-            catch (HttpRequestException httpEx)
-            {
-                Console.WriteLine($"ОШИБКА HTTP: {httpEx.Message}");
-                Console.WriteLine($"Сервер вернул ошибку 400 Bad Request.");
-                Console.WriteLine($"Проблема в формате запроса или координатах.");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"ОБЩАЯ ОШИБКА: {ex.Message}");
+                Console.WriteLine($"ОБЩАЯ ОШИБКА в GetNearbyShopsAsync: {ex.Message}");
+                Console.WriteLine($"StackTrace: {ex.StackTrace}");
             }
 
-            Console.WriteLine($"=== GetNearbyPOIAsync завершен. Найдено POI: {pois.Count} ===\n");
+            Console.WriteLine($"=== GetNearbyShopsAsync завершен. Найдено магазинов: {pois.Count} ===\n");
             return pois;
-        }
-        /// <summary>
-        /// Определяет приоритет точки интереса (чем меньше число, тем выше приоритет)
-        /// </summary>
-        private int GetPOIPriority(string poiType)
-        {
-            if (poiType.Contains("Больница") || poiType.Contains("Полиция"))
-                return 1;
-            if (poiType.Contains("Аптека"))
-                return 2;
-            if (poiType.Contains("Магазин"))
-                return 3;
-            if (poiType.Contains("остановка") || poiType.Contains("Автобус"))
-                return 4;
-            if (poiType.Contains("Кафе") || poiType.Contains("Ресторан") || poiType.Contains("Фастфуд"))
-                return 5;
-            if (poiType.Contains("Банк") || poiType.Contains("Банкомат"))
-                return 6;
-
-            return 7;
         }
         /// <summary>
         /// Создает прямой маршрут между двумя точками
