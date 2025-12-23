@@ -221,18 +221,42 @@ namespace Possible_routes_of_missing_people
             try
             {
                 Cursor = Cursors.WaitCursor;
-                // Используем текущий радиус из калькулятора
-                var routes = await routeFinder.FindRoutesFromPointAsync(
+
+                // 1. Удаляем старые маркеры объектов
+                RemoveOldMarkers();
+
+                // 2. Получаем overlay с объектами
+                var objectsOverlay = await routeFinder.FindObjectsInRadiusAsync(
                     startPoint,
                     areaCalculator.GetRadiusInMeters(),
-                    3);
+                    5); // maxObjectsPerType
 
-                DisplayRoutesOnMap(routes);
+                // 3. Добавляем новый overlay с объектами
+                if (objectsOverlay != null && objectsOverlay.Markers.Count > 0)
+                {
+                    gMapControl1.Overlays.Add(objectsOverlay);
+
+                    // Обновляем отображение
+                    gMapControl1.Refresh();
+
+                    MessageBox.Show($"Найдено объектов: {objectsOverlay.Markers.Count}",
+                                  "Результат поиска",
+                                  MessageBoxButtons.OK,
+                                  MessageBoxIcon.Information);
+                }
+                else
+                {
+                    MessageBox.Show("В указанном радиусе не найдено объектов",
+                                  "Информация",
+                                  MessageBoxButtons.OK,
+                                  MessageBoxIcon.Information);
+                }
+
                 ZoomToSearchArea(startPoint);
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Ошибка при поиске маршрутов: {ex.Message}",
+                MessageBox.Show($"Ошибка при поиске объектов: {ex.Message}",
                               "Ошибка",
                               MessageBoxButtons.OK,
                               MessageBoxIcon.Error);
@@ -242,24 +266,23 @@ namespace Possible_routes_of_missing_people
                 Cursor = Cursors.Default;
             }
         }
-        private void DisplayRoutesOnMap(List<GMapRoute> routes)
+        /// <summary>
+        /// Удаляет старые маркеры объектов
+        /// </summary>
+        private void RemoveOldMarkers()
         {
-            if (routes == null || routes.Count == 0)
-            {
-                MessageBox.Show("Не удалось построить маршруты. Возможно, в этом районе нет дорог.",
-                              "Информация",
-                              MessageBoxButtons.OK,
-                              MessageBoxIcon.Information);
-                return;
-            }
-            foreach (var route in routes)
-            {
-                var colors = new[] { Color.Green, Color.Blue, Color.Orange, Color.Purple, Color.DarkCyan };
-                int colorIndex = mainOverlay.Routes.Count % colors.Length;
+            // Находим overlay с маркерами объектов
+            var oldOverlay = gMapControl1.Overlays.FirstOrDefault(o => o.Id == "nature_objects");
 
-                route.Stroke = new Pen(colors[colorIndex], 3);
-                route.Stroke.DashStyle = System.Drawing.Drawing2D.DashStyle.Dash;
-                mainOverlay.Routes.Add(route);
+            if (oldOverlay != null)
+            {
+                Console.WriteLine($"Удаляем старые маркеры: {oldOverlay.Markers.Count}");
+                gMapControl1.Overlays.Remove(oldOverlay);
+
+                // Также можно очистить все маркеры из mainOverlay, если они там
+                mainOverlay.Markers.Clear();
+
+                gMapControl1.Refresh();
             }
         }
         private void ZoomToSearchArea(PointLatLng center)

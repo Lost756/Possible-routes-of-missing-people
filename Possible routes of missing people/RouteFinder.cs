@@ -1,111 +1,164 @@
 ﻿using GMap.NET;
 using GMap.NET.WindowsForms;
-using Newtonsoft.Json;
+using GMap.NET.WindowsForms.Markers;
 using Newtonsoft.Json.Linq;
 using System;
 using System.Collections.Generic;
+using System.Drawing;
 using System.Linq;
 using System.Net.Http;
 using System.Threading.Tasks;
 
 namespace Possible_routes_of_missing_people
 {
-    public class POI
+    public class MapObject
     {
         public string Name { get; set; }
         public string Type { get; set; }
         public PointLatLng Location { get; set; }
         public double Distance { get; set; }
+        public string OSMId { get; set; }
     }
+
     public class RouteFinder
     {
         private readonly HttpClient _httpClient;
-        private readonly Random _random;
+
+        // Определение типов объектов для поиска (только природа и дороги)
+        private readonly Dictionary<string, string[]> _objectTypes = new Dictionary<string, string[]>
+        {
+            { "river", new[] { "river", "stream", "brook", "canal" } },
+            { "water", new[] { "lake", "pond", "water", "reservoir" } },
+            { "wetland", new[] { "wetland", "marsh", "swamp", "bog" } },
+            { "meadow", new[] { "meadow", "grassland", "field", "farmland" } },
+            { "forest", new[] { "forest", "wood" } },
+            { "road", new[] { "path", "track", "footway", "road" } }
+        };
+
+        // Цвета маркеров для разных типов объектов
+        private readonly Dictionary<string, (GMarkerGoogleType markerType, Color color)> _markerStyles = new Dictionary<string, (GMarkerGoogleType, Color)>
+        {
+            { "river", (GMarkerGoogleType.blue_dot, Color.Blue) },
+            { "water", (GMarkerGoogleType.lightblue_dot, Color.LightBlue) },
+            { "wetland", (GMarkerGoogleType.purple_dot, Color.Purple) },
+            { "meadow", (GMarkerGoogleType.green_small, Color.Green) },
+            { "forest", (GMarkerGoogleType.green_dot, Color.DarkGreen) },
+            { "road", (GMarkerGoogleType.gray_small, Color.DarkGray) },
+            { "highway", (GMarkerGoogleType.red_small, Color.DarkRed) } // Для основных дорог
+        };
+
         public RouteFinder()
         {
             _httpClient = new HttpClient();
-            _httpClient.Timeout = TimeSpan.FromSeconds(10);
-            _random = new Random();
+            _httpClient.Timeout = TimeSpan.FromSeconds(15);
         }
-        /// <summary>
-        /// Основной метод поиска маршрутов к ближайшим точкам интереса
-        /// </summary>
-        public async Task<List<GMapRoute>> FindRoutesFromPointAsync(PointLatLng startPoint, int radiusMeters = 1000, int maxRoutes = 3)
-        {
-            var routes = new List<GMapRoute>();
 
-            Console.WriteLine($"=== FindRoutesFromPointAsync начат ===");
-            Console.WriteLine($"Стартовая точка: {startPoint.Lat:F6}, {startPoint.Lng:F6}");
+        /// <summary>
+        /// Основной метод поиска объектов в указанном радиусе
+        /// </summary>
+        public async Task<GMapOverlay> FindObjectsInRadiusAsync(PointLatLng centerPoint, int radiusMeters = 1000, int maxObjectsPerType = 5)
+        {
+            var overlay = new GMapOverlay("nature_objects");
+
+            Console.WriteLine($"=== Поиск природных объектов ===");
+            Console.WriteLine($"Центр: {centerPoint.Lat:F6}, {centerPoint.Lng:F6}");
             Console.WriteLine($"Радиус поиска: {radiusMeters} м");
 
             try
             {
-                // 1. Ищем ближайшие точки интереса (магазины)
-                var pois = await GetNearbyShopsAsync(startPoint, radiusMeters);
+                // 1. Ищем объекты разных типов
+                var allObjects = new List<MapObject>();
 
-                Console.WriteLine($"Найдено магазинов: {pois.Count}");
+                // Поиск рек
+                var rivers = await GetNearbyObjectsAsync(centerPoint, radiusMeters, "river");
+                allObjects.AddRange(rivers);
+                Console.WriteLine($"Найдено рек/ручьев: {rivers.Count}");
 
-                // 2. Сортируем по расстоянию
-                var sortedPOIs = pois
-                    .OrderBy(p => p.Distance)
-                    .Take(maxRoutes)
+                // Поиск водоемов
+                var waters = await GetNearbyObjectsAsync(centerPoint, radiusMeters, "water");
+                allObjects.AddRange(waters);
+                Console.WriteLine($"Найдено водоемов: {waters.Count}");
+
+                // Поиск болот
+                var wetlands = await GetNearbyObjectsAsync(centerPoint, radiusMeters, "wetland");
+                allObjects.AddRange(wetlands);
+                Console.WriteLine($"Найдено болот: {wetlands.Count}");
+
+                // Поиск лугов и полей
+                var meadows = await GetNearbyObjectsAsync(centerPoint, radiusMeters, "meadow");
+                allObjects.AddRange(meadows);
+                Console.WriteLine($"Найдено лугов/полей: {meadows.Count}");
+
+                // Поиск лесов
+                var forests = await GetNearbyObjectsAsync(centerPoint, radiusMeters, "forest");
+                allObjects.AddRange(forests);
+                Console.WriteLine($"Найдено лесов: {forests.Count}");
+
+                // Поиск дорог и троп (пешеходные/лесные)
+                var roads = await GetNearbyObjectsAsync(centerPoint, radiusMeters, "road");
+                allObjects.AddRange(roads);
+                Console.WriteLine($"Найдено дорог/троп: {roads.Count}");
+
+                // Поиск основных дорог (шоссе, автострады)
+                var highways = await GetNearbyHighwaysAsync(centerPoint, radiusMeters);
+                allObjects.AddRange(highways);
+                Console.WriteLine($"Найдено основных дорог: {highways.Count}");
+
+                // 2. Удаляем дубликаты (объекты с одинаковыми OSMId)
+                var uniqueObjects = allObjects
+                    .GroupBy(o => o.OSMId)
+                    .Select(g => g.First())
                     .ToList();
 
-                Console.WriteLine($"Отобрано для маршрутов: {sortedPOIs.Count}");
+                Console.WriteLine($"Уникальных объектов всего: {uniqueObjects.Count}");
 
-                // 3. Создаем прямые маршруты к точкам интереса
-                foreach (var poi in sortedPOIs)
+                // 3. Фильтруем по расстоянию и количеству
+                var filteredObjects = uniqueObjects
+                    .Where(o => o.Distance <= radiusMeters)
+                    .GroupBy(o => o.Type)
+                    .SelectMany(g => g.OrderBy(o => o.Distance).Take(maxObjectsPerType))
+                    .ToList();
+
+                Console.WriteLine($"Отобрано для отображения: {filteredObjects.Count}");
+
+                // 4. Создаем маркеры на карте
+                foreach (var obj in filteredObjects)
                 {
-                    var route = CreateDirectRoute(startPoint, poi.Location);
-                    route.Name = $"В магазин: {poi.Name}";
-                    routes.Add(route);
-                    Console.WriteLine($"Создан маршрут к: {poi.Name}, расстояние: {poi.Distance:F0}м");
+                    var marker = CreateMarkerForObject(obj);
+                    overlay.Markers.Add(marker);
+                    Console.WriteLine($"Добавлен маркер: {obj.Type} - {obj.Name} ({obj.Distance:F0}м)");
                 }
 
-                // 4. Если не нашли достаточно магазинов, добавляем направления
-                if (routes.Count < maxRoutes)
+                // 5. Если объектов слишком мало, добавляем базовые маркеры
+                if (filteredObjects.Count < 3)
                 {
-                    Console.WriteLine($"Недостаточно магазинов ({routes.Count}/{maxRoutes}). Добавляем направления...");
-                    var additionalRoutes = CreateDirectionRoutes(startPoint, radiusMeters, maxRoutes - routes.Count);
-                    routes.AddRange(additionalRoutes);
-
-                    foreach (var route in additionalRoutes)
-                    {
-                        Console.WriteLine($"Добавлен резервный маршрут: {route.Name}");
-                    }
+                    Console.WriteLine($"Мало объектов. Добавляем ориентиры...");
+                    AddBasicOrientationMarkers(centerPoint, radiusMeters, overlay);
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Ошибка в FindRoutesFromPointAsync: {ex.Message}");
-                Console.WriteLine($"StackTrace: {ex.StackTrace}");
-
-                // Создаем простые маршруты в разные стороны
-                routes = CreateSimpleDirectionRoutes(startPoint, radiusMeters, maxRoutes);
-                Console.WriteLine("Использованы резервные маршруты");
+                Console.WriteLine($"Ошибка: {ex.Message}");
+                AddBasicOrientationMarkers(centerPoint, radiusMeters, overlay);
             }
 
-            Console.WriteLine($"=== FindRoutesFromPointAsync завершен. Всего маршрутов: {routes.Count} ===\n");
-            return routes;
+            Console.WriteLine($"=== Поиск завершен. Маркеров: {overlay.Markers.Count} ===\n");
+            return overlay;
         }
+
         /// <summary>
-        /// Ищет магазины поблизости (оригинальный рабочий запрос)
+        /// Ищет основные дороги (шоссе, автострады)
         /// </summary>
-        private async Task<List<POI>> GetNearbyShopsAsync(PointLatLng center, int radiusMeters)
+        private async Task<List<MapObject>> GetNearbyHighwaysAsync(PointLatLng center, int radiusMeters)
         {
-            var pois = new List<POI>();
+            var highways = new List<MapObject>();
 
-            Console.WriteLine($"=== GetNearbyShopsAsync начат ===");
-            Console.WriteLine($"Центр: {center.Lat:F6}, {center.Lng:F6}");
-            Console.WriteLine($"Запрошенный радиус: {radiusMeters} м");
+            Console.WriteLine($"Поиск: основные дороги");
 
-            // Ограничиваем радиус для Overpass API (максимум 2 км для надежности)
-            int searchRadius = Math.Min(radiusMeters, 2000);
-            Console.WriteLine($"Фактический радиус поиска: {searchRadius} м");
+            int searchRadius = Math.Min(radiusMeters, 3000);
 
             try
             {
-                // Рассчитываем границы поиска
                 double latOffset = searchRadius / 111120.0;
                 double lngOffset = searchRadius / (111120.0 * Math.Cos(center.Lat * Math.PI / 180));
 
@@ -114,193 +167,389 @@ namespace Possible_routes_of_missing_people
                 var west = center.Lng - lngOffset;
                 var east = center.Lng + lngOffset;
 
-                Console.WriteLine($"Область поиска: {south:F6}, {west:F6}, {north:F6}, {east:F6}");
+                string bbox = $"{south.ToString(System.Globalization.CultureInfo.InvariantCulture)}," +
+                             $"{west.ToString(System.Globalization.CultureInfo.InvariantCulture)}," +
+                             $"{north.ToString(System.Globalization.CultureInfo.InvariantCulture)}," +
+                             $"{east.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
 
+                // Запрос для основных дорог
                 string overpassQuery = $"[out:json];" +
-                    $"node[\"shop\"]({south.ToString(System.Globalization.CultureInfo.InvariantCulture)}," +
-                    $"{west.ToString(System.Globalization.CultureInfo.InvariantCulture)}," +
-                    $"{north.ToString(System.Globalization.CultureInfo.InvariantCulture)}," +
-                    $"{east.ToString(System.Globalization.CultureInfo.InvariantCulture)});" +
-                    $"out;";
+                                     $"(" +
+                                     $"way[\"highway\"~\"motorway|trunk|primary|secondary|tertiary|unclassified|residential\"]({bbox});" +
+                                     $");" +
+                                     $"out center;";
 
-                Console.WriteLine($"Запрос: {overpassQuery}");
+                var server = "https://overpass-api.de/api/interpreter";
 
-                // Пробуем разные Overpass API серверы
-                var servers = new[]
+                try
                 {
-                    "https://overpass-api.de/api/interpreter",  // Основной сервер
-                    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",  // Резервный
-                    "https://lz4.overpass-api.de/api/interpreter"  // Быстрый сервер
-                };
+                    var url = $"{server}?data={Uri.EscapeDataString(overpassQuery)}";
+                    var response = await _httpClient.GetStringAsync(url);
 
-                foreach (var server in servers)
-                {
-                    try
+                    if (string.IsNullOrEmpty(response) || response.Contains("error"))
                     {
-                        Console.WriteLine($"Пробуем сервер: {server}");
-                        var url = $"{server}?data={Uri.EscapeDataString(overpassQuery)}";
+                        return highways;
+                    }
 
-                        var response = await _httpClient.GetStringAsync(url);
-                        Console.WriteLine($"Ответ получен, длина: {response.Length} символов");
+                    var json = JObject.Parse(response);
+                    var elements = (JArray)json["elements"];
 
-                        if (string.IsNullOrEmpty(response) || response.Contains("error"))
+                    if (elements != null)
+                    {
+                        foreach (var element in elements)
                         {
-                            Console.WriteLine($"Сервер {server} вернул ошибку или пустой ответ");
-                            continue;
-                        }
-
-                        if (response.Length > 100)
-                        {
-                            Console.WriteLine($"Начало ответа: {response.Substring(0, Math.Min(100, response.Length))}...");
-                        }
-
-                        var json = JObject.Parse(response);
-                        var elements = (JArray)json["elements"];
-
-                        Console.WriteLine($"Найдено элементов: {elements?.Count ?? 0}");
-
-                        if (elements != null && elements.Count > 0)
-                        {
-                            foreach (var element in elements)
+                            var highway = ParseHighwayElement(element, center);
+                            if (highway != null)
                             {
-                                try
-                                {
-                                    var type = element["type"]?.ToString();
-                                    if (type != "node") continue;
-
-                                    var tags = element["tags"] as JObject;
-                                    if (tags == null) continue;
-
-                                    string name = tags["name"]?.ToString() ?? "Магазин без названия";
-                                    string shopType = tags["shop"]?.ToString() ?? "магазин";
-
-                                    // Получаем координаты
-                                    var lat = (double?)element["lat"] ?? 0;
-                                    var lon = (double?)element["lon"] ?? 0;
-
-                                    if (lat == 0 || lon == 0) continue;
-
-                                    var location = new PointLatLng(lat, lon);
-                                    var distance = CalculateDistance(center, location);
-
-                                    // Фильтруем по реальному расстоянию
-                                    if (distance <= searchRadius)
-                                    {
-                                        pois.Add(new POI
-                                        {
-                                            Name = name,
-                                            Type = $"Магазин ({shopType})",
-                                            Location = location,
-                                            Distance = Math.Round(distance)
-                                        });
-
-                                        Console.WriteLine($"  ✓ {name} - {shopType} ({distance:F0}м)");
-                                    }
-                                }
-                                catch (Exception ex)
-                                {
-                                    Console.WriteLine($"Ошибка обработки элемента: {ex.Message}");
-                                    continue;
-                                }
-                            }
-
-                            if (pois.Count > 0)
-                            {
-                                Console.WriteLine($"Успешно использован сервер: {server}");
-                                break;
+                                highways.Add(highway);
                             }
                         }
-                        else
+                    }
+                }
+                catch
+                {
+                    return highways;
+                }
+            }
+            catch
+            {
+                // Игнорируем ошибки
+            }
+
+            return highways;
+        }
+
+        /// <summary>
+        /// Парсит элемент дороги
+        /// </summary>
+        private MapObject ParseHighwayElement(JToken element, PointLatLng center)
+        {
+            var type = element["type"]?.ToString();
+            var id = element["id"]?.ToString();
+
+            if (string.IsNullOrEmpty(id)) return null;
+
+            double lat = 0, lon = 0;
+
+            if (type == "node")
+            {
+                lat = (double?)element["lat"] ?? 0;
+                lon = (double?)element["lon"] ?? 0;
+            }
+            else if (type == "way")
+            {
+                var centerData = element["center"];
+                if (centerData != null)
+                {
+                    lat = (double?)centerData["lat"] ?? 0;
+                    lon = (double?)centerData["lon"] ?? 0;
+                }
+            }
+
+            if (lat == 0 || lon == 0) return null;
+
+            var location = new PointLatLng(lat, lon);
+            var distance = CalculateDistance(center, location);
+
+            // Получаем информацию о дороге
+            var tags = element["tags"] as JObject;
+            string name = "Дорога";
+            string roadType = "road";
+
+            if (tags != null)
+            {
+                name = tags["name"]?.ToString() ??
+                       tags["ref"]?.ToString() ??
+                       GetHighwayTypeName(tags["highway"]?.ToString()) ??
+                       "Дорога";
+
+                roadType = "highway"; // Для стилизации основных дорог
+            }
+
+            // Сокращаем длинное название
+            if (name.Length > 25)
+                name = name.Substring(0, 22) + "...";
+
+            return new MapObject
+            {
+                Name = name,
+                Type = roadType,
+                Location = location,
+                Distance = Math.Round(distance),
+                OSMId = $"highway_{id}"
+            };
+        }
+
+        /// <summary>
+        /// Преобразует тип дороги в читаемое название
+        /// </summary>
+        private string GetHighwayTypeName(string highwayType)
+        {
+            return highwayType switch
+            {
+                "motorway" => "Автострада",
+                "trunk" => "Магистраль",
+                "primary" => "Основная дорога",
+                "secondary" => "Вторичная дорога",
+                "tertiary" => "Третичная дорога",
+                "unclassified" => "Дорога",
+                "residential" => "Жилая улица",
+                _ => "Дорога"
+            };
+        }
+
+        /// <summary>
+        /// Ищет объекты указанного типа поблизости
+        /// </summary>
+        private async Task<List<MapObject>> GetNearbyObjectsAsync(PointLatLng center, int radiusMeters, string objectType)
+        {
+            var objects = new List<MapObject>();
+
+            Console.WriteLine($"Поиск: {objectType}");
+
+            int searchRadius = Math.Min(radiusMeters, 3000);
+
+            try
+            {
+                double latOffset = searchRadius / 111120.0;
+                double lngOffset = searchRadius / (111120.0 * Math.Cos(center.Lat * Math.PI / 180));
+
+                var south = center.Lat - latOffset;
+                var north = center.Lat + latOffset;
+                var west = center.Lng - lngOffset;
+                var east = center.Lng + lngOffset;
+
+                string overpassQuery = BuildOverpassQuery(south, west, north, east, objectType);
+
+                if (string.IsNullOrEmpty(overpassQuery))
+                {
+                    return objects;
+                }
+
+                var server = "https://overpass-api.de/api/interpreter";
+
+                try
+                {
+                    var url = $"{server}?data={Uri.EscapeDataString(overpassQuery)}";
+                    var response = await _httpClient.GetStringAsync(url);
+
+                    if (string.IsNullOrEmpty(response) || response.Contains("error"))
+                    {
+                        return objects;
+                    }
+
+                    var json = JObject.Parse(response);
+                    var elements = (JArray)json["elements"];
+
+                    if (elements != null)
+                    {
+                        foreach (var element in elements)
                         {
-                            Console.WriteLine($"На сервере {server} в этой области нет магазинов.");
+                            var obj = ParseOSMElement(element, center, objectType);
+                            if (obj != null)
+                            {
+                                objects.Add(obj);
+                            }
                         }
                     }
-                    catch (HttpRequestException)
-                    {
-                        Console.WriteLine($"Сервер {server} недоступен");
-                        continue;
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"Ошибка с сервером {server}: {ex.Message}");
-                        continue;
-                    }
                 }
-
-                if (pois.Count == 0)
+                catch
                 {
-                    Console.WriteLine($"Все серверы вернули пустой результат или произошла ошибка.");
-                    Console.WriteLine($"Попробуйте кликнуть в районе с магазинами (центр города).");
+                    return objects;
                 }
             }
-            catch (Exception ex)
+            catch
             {
-                Console.WriteLine($"ОБЩАЯ ОШИБКА в GetNearbyShopsAsync: {ex.Message}");
-                Console.WriteLine($"StackTrace: {ex.StackTrace}");
+                // Игнорируем ошибки
             }
 
-            Console.WriteLine($"=== GetNearbyShopsAsync завершен. Найдено магазинов: {pois.Count} ===\n");
-            return pois;
+            return objects;
         }
+
         /// <summary>
-        /// Создает прямой маршрут между двумя точками
+        /// Строит Overpass API запрос
         /// </summary>
-        private GMapRoute CreateDirectRoute(PointLatLng start, PointLatLng end)
+        private string BuildOverpassQuery(double south, double west, double north, double east, string objectType)
         {
-            return new GMapRoute(new List<PointLatLng> { start, end }, "Прямой маршрут");
-        }
-        /// <summary>
-        /// Создает маршруты в основные направления (север, восток, юг, запад)
-        /// </summary>
-        private List<GMapRoute> CreateDirectionRoutes(PointLatLng center, int radiusMeters, int count)
-        {
-            var routes = new List<GMapRoute>();
-            var directions = new[]
+            string bbox = $"{south.ToString(System.Globalization.CultureInfo.InvariantCulture)}," +
+                         $"{west.ToString(System.Globalization.CultureInfo.InvariantCulture)}," +
+                         $"{north.ToString(System.Globalization.CultureInfo.InvariantCulture)}," +
+                         $"{east.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
+
+            return objectType switch
             {
-                ("север", 0.0),
-                ("восток", Math.PI / 2),
-                ("юг", Math.PI),
-                ("запад", 3 * Math.PI / 2)
+                "river" => $"[out:json];" +
+                          $"(" +
+                          $"way[\"waterway\"~\"river|stream|brook|canal\"]({bbox});" +
+                          $");" +
+                          $"out center;",
+
+                "water" => $"[out:json];" +
+                          $"(" +
+                          $"way[\"natural\"=\"water\"]({bbox});" +
+                          $"way[\"water\"]({bbox});" +
+                          $");" +
+                          $"out center;",
+
+                "wetland" => $"[out:json];" +
+                            $"(" +
+                            $"way[\"natural\"~\"wetland|marsh|swamp|bog\"]({bbox});" +
+                            $");" +
+                            $"out center;",
+
+                "meadow" => $"[out:json];" +
+                           $"(" +
+                           $"way[\"natural\"=\"grassland\"]({bbox});" +
+                           $"way[\"landuse\"~\"meadow|grass|farmland|field\"]({bbox});" +
+                           $");" +
+                           $"out center;",
+
+                "forest" => $"[out:json];" +
+                           $"(" +
+                           $"way[\"natural\"~\"forest|wood\"]({bbox});" +
+                           $"way[\"landuse\"=\"forest\"]({bbox});" +
+                           $");" +
+                           $"out center;",
+
+                "road" => $"[out:json];" +
+                         $"(" +
+                         $"way[\"highway\"~\"path|track|footway|bridleway|cycleway\"]({bbox});" +
+                         $");" +
+                         $"out center;",
+
+                _ => string.Empty
+            };
+        }
+
+        /// <summary>
+        /// Парсит элемент OSM
+        /// </summary>
+        private MapObject ParseOSMElement(JToken element, PointLatLng center, string objectType)
+        {
+            var type = element["type"]?.ToString();
+            var id = element["id"]?.ToString();
+
+            if (string.IsNullOrEmpty(id)) return null;
+
+            double lat = 0, lon = 0;
+
+            if (type == "node")
+            {
+                lat = (double?)element["lat"] ?? 0;
+                lon = (double?)element["lon"] ?? 0;
+            }
+            else if (type == "way")
+            {
+                var centerData = element["center"];
+                if (centerData != null)
+                {
+                    lat = (double?)centerData["lat"] ?? 0;
+                    lon = (double?)centerData["lon"] ?? 0;
+                }
+            }
+
+            if (lat == 0 || lon == 0) return null;
+
+            var location = new PointLatLng(lat, lon);
+            var distance = CalculateDistance(center, location);
+
+            // Получаем название
+            var tags = element["tags"] as JObject;
+            string name = "Без названия";
+
+            if (tags != null)
+            {
+                name = tags["name"]?.ToString() ??
+                       tags["waterway"]?.ToString() ??
+                       tags["natural"]?.ToString() ??
+                       tags["landuse"]?.ToString() ??
+                       tags["highway"]?.ToString() ??
+                       "Без названия";
+            }
+
+            // Сокращаем длинное название
+            if (name.Length > 25)
+                name = name.Substring(0, 22) + "...";
+
+            return new MapObject
+            {
+                Name = name,
+                Type = objectType,
+                Location = location,
+                Distance = Math.Round(distance),
+                OSMId = $"{type}_{id}"
+            };
+        }
+
+        /// <summary>
+        /// Создает маркер для объекта
+        /// </summary>
+        private GMarkerGoogle CreateMarkerForObject(MapObject mapObject)
+        {
+            // Получаем стиль маркера
+            var (markerType, color) = _markerStyles.TryGetValue(mapObject.Type, out var style)
+                ? style
+                : (GMarkerGoogleType.yellow_small, Color.Yellow);
+
+            var marker = new GMarkerGoogle(mapObject.Location, markerType);
+
+            // Настраиваем всплывающую подсказку
+            string typeName = mapObject.Type switch
+            {
+                "river" => "Река/Ручей",
+                "water" => "Водоем",
+                "wetland" => "Болото",
+                "meadow" => "Луг/Поле",
+                "forest" => "Лес",
+                "road" => "Тропа/Дорожка",
+                "highway" => "Дорога",
+                _ => "Объект"
             };
 
-            for (int i = 0; i < Math.Min(count, directions.Length); i++)
-            {
-                var (name, angle) = directions[i];
-                var endPoint = CalculateDestination(center, angle, radiusMeters * 0.8);
+            marker.ToolTipText = $"{typeName}\n" +
+                               $"{mapObject.Name}\n" +
+                               $"Расстояние: {mapObject.Distance:F0} м";
 
-                var route = CreateDirectRoute(center, endPoint);
-                route.Name = $"Направление: {name}";
-                routes.Add(route);
-            }
+            marker.ToolTip.Fill = new SolidBrush(Color.FromArgb(240, Color.White));
+            marker.ToolTip.Foreground = new SolidBrush(color);
+            marker.ToolTip.Stroke = new Pen(color, 1);
+            marker.ToolTip.TextPadding = new Size(8, 8);
+            marker.ToolTip.Font = new Font("Arial", 8.5f);
 
-            return routes;
+            return marker;
         }
+
         /// <summary>
-        /// Создает простые маршруты в разные стороны
+        /// Добавляет базовые маркеры ориентиров
         /// </summary>
-        private List<GMapRoute> CreateSimpleDirectionRoutes(PointLatLng center, int radiusMeters, int count)
+        private void AddBasicOrientationMarkers(PointLatLng center, int radiusMeters, GMapOverlay overlay)
         {
-            var routes = new List<GMapRoute>();
-
-            for (int i = 0; i < count; i++)
+            // Добавляем 4 маркера по сторонам света
+            var directions = new[]
             {
-                double angle = (2 * Math.PI / count) * i;
-                var endPoint = CalculateDestination(center, angle, radiusMeters * 0.7);
+                ("Север", 0.0, GMarkerGoogleType.arrow),
+                ("Восток", Math.PI / 2, GMarkerGoogleType.arrow),
+                ("Юг", Math.PI, GMarkerGoogleType.arrow),
+                ("Запад", 3 * Math.PI / 2, GMarkerGoogleType.arrow)
+            };
 
-                var route = CreateDirectRoute(center, endPoint);
-                route.Name = $"Направление {i + 1}";
-                routes.Add(route);
+            foreach (var (direction, angle, markerType) in directions)
+            {
+                var location = CalculateDestination(center, angle, radiusMeters * 0.6);
+                var marker = new GMarkerGoogle(location, markerType);
+                marker.ToolTipText = $"Направление: {direction}";
+                overlay.Markers.Add(marker);
             }
-
-            return routes;
         }
+
         #region Вспомогательные геометрические методы
+
         /// <summary>
         /// Рассчитывает расстояние между двумя точками в метрах
         /// </summary>
         private double CalculateDistance(PointLatLng point1, PointLatLng point2)
         {
-            double R = 6371000; // Радиус Земли в метрах
+            double R = 6371000;
             double dLat = (point2.Lat - point1.Lat) * Math.PI / 180;
             double dLon = (point2.Lng - point1.Lng) * Math.PI / 180;
             double a = Math.Sin(dLat / 2) * Math.Sin(dLat / 2) +
@@ -309,6 +558,7 @@ namespace Possible_routes_of_missing_people
             double c = 2 * Math.Atan2(Math.Sqrt(a), Math.Sqrt(1 - a));
             return R * c;
         }
+
         /// <summary>
         /// Рассчитывает точку назначения по азимуту и расстоянию
         /// </summary>
@@ -326,6 +576,7 @@ namespace Possible_routes_of_missing_people
 
             return new PointLatLng(lat2 * 180 / Math.PI, lon2 * 180 / Math.PI);
         }
+
         #endregion
     }
 }
