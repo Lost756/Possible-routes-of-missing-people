@@ -190,19 +190,66 @@ namespace Possible_routes_of_missing_people
 
                 Console.WriteLine($"Координаты: {point.Lat:F6}, {point.Lng:F6}");
                 Console.WriteLine(areaCalculator.GetSearchInfo());
-                // Очищаем предыдущие элементы
-                mainOverlay.Markers.Clear();
-                mainOverlay.Polygons.Clear();
-                mainOverlay.Routes.Clear();
-                // Добавляем маркер места пропажи
-                var marker = new GMarkerGoogle(point, GMarkerGoogleType.red);
-                marker.ToolTipText = areaCalculator.GetMarkerTooltip(point);
-                mainOverlay.Markers.Add(marker);
+
+                // Удаляем только старые объекты, но НЕ точку пропажи
+                RemoveOldObjects();
+
+                // Добавляем или обновляем маркер места пропажи
+                UpdateDisappearanceMarker(point);
+
                 // Рисуем область поиска
                 DrawSearchArea(point);
-                // Ищем маршруты
+
+                // Ищем и отображаем объекты
                 await FindPossibleRoutes(point);
             }
+        }
+
+        /// <summary>
+        /// Обновляет маркер места пропажи
+        /// </summary>
+        private void UpdateDisappearanceMarker(PointLatLng point)
+        {
+            // Удаляем старый маркер пропажи, если он есть
+            var oldMarker = mainOverlay.Markers.FirstOrDefault(m => m.ToolTipText?.Contains("Место пропажи") == true);
+            if (oldMarker != null)
+            {
+                mainOverlay.Markers.Remove(oldMarker);
+            }
+
+            // Добавляем новый маркер места пропажи
+            var marker = new GMarkerGoogle(point, GMarkerGoogleType.red);
+            marker.ToolTipText = areaCalculator.GetMarkerTooltip(point);
+            marker.ToolTip.Fill = new SolidBrush(Color.FromArgb(220, Color.White));
+            marker.ToolTip.Foreground = new SolidBrush(Color.DarkRed);
+            marker.ToolTip.Stroke = new Pen(Color.DarkRed, 2);
+            marker.ToolTip.Font = new Font("Arial", 9, FontStyle.Bold);
+
+            mainOverlay.Markers.Add(marker);
+
+            Console.WriteLine($"Добавлен маркер пропажи: {point.Lat:F5}, {point.Lng:F5}");
+        }
+
+        /// <summary>
+        /// Удаляет старые объекты (но не точку пропажи)
+        /// </summary>
+        private void RemoveOldObjects()
+        {
+            // Находим и удаляем overlay с природными объектами
+            var objectsOverlay = gMapControl1.Overlays.FirstOrDefault(o => o.Id == "nature_objects");
+            if (objectsOverlay != null)
+            {
+                Console.WriteLine($"Удаляем старые объекты: {objectsOverlay.Markers.Count}");
+                gMapControl1.Overlays.Remove(objectsOverlay);
+            }
+
+            // Удаляем старые полигоны областей поиска
+            mainOverlay.Polygons.Clear();
+
+            // Удаляем старые маршруты (если они есть)
+            mainOverlay.Routes.Clear();
+
+            gMapControl1.Refresh();
         }
         private void DrawSearchArea(PointLatLng center)
         {
@@ -222,16 +269,13 @@ namespace Possible_routes_of_missing_people
             {
                 Cursor = Cursors.WaitCursor;
 
-                // 1. Удаляем старые маркеры объектов
-                RemoveOldMarkers();
-
-                // 2. Получаем overlay с объектами
+                // Получаем overlay с объектами
                 var objectsOverlay = await routeFinder.FindObjectsInRadiusAsync(
                     startPoint,
                     areaCalculator.GetRadiusInMeters(),
-                    5); // maxObjectsPerType
+                    7); // Увеличил количество объектов для города
 
-                // 3. Добавляем новый overlay с объектами
+                // Добавляем новый overlay с объектами
                 if (objectsOverlay != null && objectsOverlay.Markers.Count > 0)
                 {
                     gMapControl1.Overlays.Add(objectsOverlay);
@@ -239,14 +283,25 @@ namespace Possible_routes_of_missing_people
                     // Обновляем отображение
                     gMapControl1.Refresh();
 
-                    MessageBox.Show($"Найдено объектов: {objectsOverlay.Markers.Count}",
-                                  "Результат поиска",
-                                  MessageBoxButtons.OK,
-                                  MessageBoxIcon.Information);
+                    Console.WriteLine($"Найдено объектов: {objectsOverlay.Markers.Count}");
+
+                    // Показываем информацию только если объектов мало
+                    if (objectsOverlay.Markers.Count < 3)
+                    {
+                        MessageBox.Show($"Найдено объектов: {objectsOverlay.Markers.Count}\n" +
+                                      "Попробуйте увеличить радиус поиска или выбрать другую точку.",
+                                      "Результат поиска",
+                                      MessageBoxButtons.OK,
+                                      MessageBoxIcon.Information);
+                    }
                 }
                 else
                 {
-                    MessageBox.Show("В указанном радиусе не найдено объектов",
+                    MessageBox.Show("В указанном радиусе не найдено объектов.\n" +
+                                  "Попробуйте:\n" +
+                                  "1. Увеличить радиус поиска\n" +
+                                  "2. Кликнуть в районе с дорогами или водоемами\n" +
+                                  "3. Проверить интернет-соединение",
                                   "Информация",
                                   MessageBoxButtons.OK,
                                   MessageBoxIcon.Information);
@@ -256,7 +311,9 @@ namespace Possible_routes_of_missing_people
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Ошибка при поиске объектов: {ex.Message}",
+                Console.WriteLine($"Ошибка при поиске объектов: {ex.Message}");
+                MessageBox.Show($"Ошибка при поиске объектов: {ex.Message}\n" +
+                              "Проверьте интернет-соединение.",
                               "Ошибка",
                               MessageBoxButtons.OK,
                               MessageBoxIcon.Error);
@@ -264,25 +321,6 @@ namespace Possible_routes_of_missing_people
             finally
             {
                 Cursor = Cursors.Default;
-            }
-        }
-        /// <summary>
-        /// Удаляет старые маркеры объектов
-        /// </summary>
-        private void RemoveOldMarkers()
-        {
-            // Находим overlay с маркерами объектов
-            var oldOverlay = gMapControl1.Overlays.FirstOrDefault(o => o.Id == "nature_objects");
-
-            if (oldOverlay != null)
-            {
-                Console.WriteLine($"Удаляем старые маркеры: {oldOverlay.Markers.Count}");
-                gMapControl1.Overlays.Remove(oldOverlay);
-
-                // Также можно очистить все маркеры из mainOverlay, если они там
-                mainOverlay.Markers.Clear();
-
-                gMapControl1.Refresh();
             }
         }
         private void ZoomToSearchArea(PointLatLng center)

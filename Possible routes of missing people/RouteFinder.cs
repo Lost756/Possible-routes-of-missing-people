@@ -18,13 +18,14 @@ namespace Possible_routes_of_missing_people
         public PointLatLng Location { get; set; }
         public double Distance { get; set; }
         public string OSMId { get; set; }
+        public string HighwayType { get; set; } // Новое поле для типа дороги
     }
 
     public class RouteFinder
     {
         private readonly HttpClient _httpClient;
 
-        // Определение типов объектов для поиска (только природа и дороги)
+        // Определение типов объектов для поиска
         private readonly Dictionary<string, string[]> _objectTypes = new Dictionary<string, string[]>
         {
             { "river", new[] { "river", "stream", "brook", "canal" } },
@@ -44,118 +45,129 @@ namespace Possible_routes_of_missing_people
             { "meadow", (GMarkerGoogleType.green_small, Color.Green) },
             { "forest", (GMarkerGoogleType.green_dot, Color.DarkGreen) },
             { "road", (GMarkerGoogleType.gray_small, Color.DarkGray) },
-            { "highway", (GMarkerGoogleType.red_small, Color.DarkRed) } // Для основных дорог
+            { "highway", (GMarkerGoogleType.red_small, Color.DarkRed) },
+            { "major_road", (GMarkerGoogleType.orange_small, Color.Orange) },
+            { "minor_road", (GMarkerGoogleType.yellow_small, Color.Gold) }
+        };
+
+        // Приоритеты типов объектов (чем выше число, тем выше приоритет)
+        private readonly Dictionary<string, int> _objectPriorities = new Dictionary<string, int>
+        {
+            { "highway", 10 },      // Основные дороги
+            { "major_road", 9 },    // Важные дороги
+            { "minor_road", 8 },    // Второстепенные дороги
+            { "road", 7 },          // Тропы/дорожки
+            { "river", 6 },         // Реки
+            { "water", 5 },         // Водоемы
+            { "forest", 4 },        // Леса
+            { "meadow", 3 },        // Луга/поля
+            { "wetland", 2 }        // Болота
         };
 
         public RouteFinder()
         {
             _httpClient = new HttpClient();
-            _httpClient.Timeout = TimeSpan.FromSeconds(15);
+            _httpClient.Timeout = TimeSpan.FromSeconds(25);
         }
 
         /// <summary>
         /// Основной метод поиска объектов в указанном радиусе
         /// </summary>
-        public async Task<GMapOverlay> FindObjectsInRadiusAsync(PointLatLng centerPoint, int radiusMeters = 1000, int maxObjectsPerType = 5)
+        public async Task<GMapOverlay> FindObjectsInRadiusAsync(PointLatLng centerPoint, int radiusMeters = 1000, int maxObjectsPerType = 10)
         {
             var overlay = new GMapOverlay("nature_objects");
 
-            Console.WriteLine($"=== Поиск природных объектов ===");
+            Console.WriteLine($"=== Поиск объектов ===");
             Console.WriteLine($"Центр: {centerPoint.Lat:F6}, {centerPoint.Lng:F6}");
             Console.WriteLine($"Радиус поиска: {radiusMeters} м");
 
             try
             {
-                // 1. Ищем объекты разных типов
                 var allObjects = new List<MapObject>();
 
-                // Поиск рек
+                // 1. Поиск ДОРОГ - самый важный для города
+                Console.WriteLine("\n--- Поиск дорог ---");
+
+                // Основные дороги (шоссе, магистрали)
+                var highways = await GetNearbyHighwaysAsync(centerPoint, radiusMeters, "highway");
+                allObjects.AddRange(highways);
+                Console.WriteLine($"Найдено основных дорог: {highways.Count}");
+
+                // Второстепенные дороги (городские)
+                var cityRoads = await GetNearbyCityRoadsAsync(centerPoint, radiusMeters);
+                allObjects.AddRange(cityRoads);
+                Console.WriteLine($"Найдено городских дорог: {cityRoads.Count}");
+
+                // Пешеходные дорожки и тропы
+                var pedestrianRoads = await GetNearbyPedestrianRoadsAsync(centerPoint, radiusMeters);
+                allObjects.AddRange(pedestrianRoads);
+                Console.WriteLine($"Найдено пешеходных дорожек: {pedestrianRoads.Count}");
+
+                // 2. Поиск природных объектов
+                Console.WriteLine("\n--- Поиск природных объектов ---");
+
+                // Реки и ручьи
                 var rivers = await GetNearbyObjectsAsync(centerPoint, radiusMeters, "river");
                 allObjects.AddRange(rivers);
                 Console.WriteLine($"Найдено рек/ручьев: {rivers.Count}");
 
-                // Поиск водоемов
+                // Водоемы
                 var waters = await GetNearbyObjectsAsync(centerPoint, radiusMeters, "water");
                 allObjects.AddRange(waters);
                 Console.WriteLine($"Найдено водоемов: {waters.Count}");
 
-                // Поиск болот
+                // Болота
                 var wetlands = await GetNearbyObjectsAsync(centerPoint, radiusMeters, "wetland");
                 allObjects.AddRange(wetlands);
                 Console.WriteLine($"Найдено болот: {wetlands.Count}");
 
-                // Поиск лугов и полей
+                // Луга и поля
                 var meadows = await GetNearbyObjectsAsync(centerPoint, radiusMeters, "meadow");
                 allObjects.AddRange(meadows);
                 Console.WriteLine($"Найдено лугов/полей: {meadows.Count}");
 
-                // Поиск лесов
+                // Леса
                 var forests = await GetNearbyObjectsAsync(centerPoint, radiusMeters, "forest");
                 allObjects.AddRange(forests);
                 Console.WriteLine($"Найдено лесов: {forests.Count}");
 
-                // Поиск дорог и троп (пешеходные/лесные)
-                var roads = await GetNearbyObjectsAsync(centerPoint, radiusMeters, "road");
-                allObjects.AddRange(roads);
-                Console.WriteLine($"Найдено дорог/троп: {roads.Count}");
+                Console.WriteLine($"\nВсего найдено объектов: {allObjects.Count}");
 
-                // Поиск основных дорог (шоссе, автострады)
-                var highways = await GetNearbyHighwaysAsync(centerPoint, radiusMeters);
-                allObjects.AddRange(highways);
-                Console.WriteLine($"Найдено основных дорог: {highways.Count}");
+                // 3. Обработка и фильтрация объектов
+                var filteredObjects = ProcessAndFilterObjects(allObjects, radiusMeters, maxObjectsPerType);
 
-                // 2. Удаляем дубликаты (объекты с одинаковыми OSMId)
-                var uniqueObjects = allObjects
-                    .GroupBy(o => o.OSMId)
-                    .Select(g => g.First())
-                    .ToList();
+                // 4. Создание маркеров
+                CreateMarkersForObjects(filteredObjects, overlay);
 
-                Console.WriteLine($"Уникальных объектов всего: {uniqueObjects.Count}");
-
-                // 3. Фильтруем по расстоянию и количеству
-                var filteredObjects = uniqueObjects
-                    .Where(o => o.Distance <= radiusMeters)
-                    .GroupBy(o => o.Type)
-                    .SelectMany(g => g.OrderBy(o => o.Distance).Take(maxObjectsPerType))
-                    .ToList();
-
-                Console.WriteLine($"Отобрано для отображения: {filteredObjects.Count}");
-
-                // 4. Создаем маркеры на карте
-                foreach (var obj in filteredObjects)
+                // 5. Проверка результатов
+                if (overlay.Markers.Count == 0)
                 {
-                    var marker = CreateMarkerForObject(obj);
-                    overlay.Markers.Add(marker);
-                    Console.WriteLine($"Добавлен маркер: {obj.Type} - {obj.Name} ({obj.Distance:F0}м)");
-                }
-
-                // 5. Если объектов слишком мало, добавляем базовые маркеры
-                if (filteredObjects.Count < 3)
-                {
-                    Console.WriteLine($"Мало объектов. Добавляем ориентиры...");
+                    Console.WriteLine("Не найдено объектов. Добавляем базовые ориентиры...");
                     AddBasicOrientationMarkers(centerPoint, radiusMeters, overlay);
+                }
+                else if (overlay.Markers.Count < 5)
+                {
+                    Console.WriteLine($"Найдено мало объектов ({overlay.Markers.Count}). Добавляем дополнительные ориентиры...");
+                    AddAdditionalOrientationMarkers(centerPoint, radiusMeters, overlay);
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Ошибка: {ex.Message}");
+                Console.WriteLine($"Ошибка при поиске объектов: {ex.Message}");
                 AddBasicOrientationMarkers(centerPoint, radiusMeters, overlay);
             }
 
-            Console.WriteLine($"=== Поиск завершен. Маркеров: {overlay.Markers.Count} ===\n");
+            Console.WriteLine($"\n=== Поиск завершен. Маркеров: {overlay.Markers.Count} ===");
             return overlay;
         }
 
         /// <summary>
-        /// Ищет основные дороги (шоссе, автострады)
+        /// Ищет основные дороги (шоссе, автострады, магистрали)
         /// </summary>
-        private async Task<List<MapObject>> GetNearbyHighwaysAsync(PointLatLng center, int radiusMeters)
+        private async Task<List<MapObject>> GetNearbyHighwaysAsync(PointLatLng center, int radiusMeters, string roadType)
         {
-            var highways = new List<MapObject>();
-
-            Console.WriteLine($"Поиск: основные дороги");
-
-            int searchRadius = Math.Min(radiusMeters, 3000);
+            var roads = new List<MapObject>();
+            int searchRadius = CalculateAdjustedSearchRadius(radiusMeters, true);
 
             try
             {
@@ -173,24 +185,76 @@ namespace Possible_routes_of_missing_people
                              $"{east.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
 
                 // Запрос для основных дорог
-                string overpassQuery = $"[out:json];" +
+                string overpassQuery = $"[out:json][timeout:30];" +
                                      $"(" +
-                                     $"way[\"highway\"~\"motorway|trunk|primary|secondary|tertiary|unclassified|residential\"]({bbox});" +
+                                     $"way[\"highway\"~\"motorway|trunk|primary|secondary\"]({bbox});" +
                                      $");" +
-                                     $"out center;";
+                                     $"out center geom;";
 
-                var server = "https://overpass-api.de/api/interpreter";
+                Console.WriteLine($"Поиск основных дорог в области: {south:F6}, {west:F6} - {north:F6}, {east:F6}");
 
-                try
+                var response = await ExecuteOverpassQueryAsync(overpassQuery);
+                if (!string.IsNullOrEmpty(response))
                 {
-                    var url = $"{server}?data={Uri.EscapeDataString(overpassQuery)}";
-                    var response = await _httpClient.GetStringAsync(url);
+                    var json = JObject.Parse(response);
+                    var elements = (JArray)json["elements"];
 
-                    if (string.IsNullOrEmpty(response) || response.Contains("error"))
+                    if (elements != null)
                     {
-                        return highways;
-                    }
+                        Console.WriteLine($"Найдено элементов дорог: {elements.Count}");
 
+                        foreach (var element in elements)
+                        {
+                            var road = ParseRoadElement(element, center, "highway");
+                            if (road != null && road.Distance <= radiusMeters * 1.5) // Увеличиваем допустимое расстояние
+                            {
+                                roads.Add(road);
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Ошибка при поиске основных дорог: {ex.Message}");
+            }
+
+            return roads;
+        }
+
+        /// <summary>
+        /// Ищет городские дороги
+        /// </summary>
+        private async Task<List<MapObject>> GetNearbyCityRoadsAsync(PointLatLng center, int radiusMeters)
+        {
+            var roads = new List<MapObject>();
+            int searchRadius = CalculateAdjustedSearchRadius(radiusMeters, true);
+
+            try
+            {
+                double latOffset = searchRadius / 111120.0;
+                double lngOffset = searchRadius / (111120.0 * Math.Cos(center.Lat * Math.PI / 180));
+
+                var south = center.Lat - latOffset;
+                var north = center.Lat + latOffset;
+                var west = center.Lng - lngOffset;
+                var east = center.Lng + lngOffset;
+
+                string bbox = $"{south.ToString(System.Globalization.CultureInfo.InvariantCulture)}," +
+                             $"{west.ToString(System.Globalization.CultureInfo.InvariantCulture)}," +
+                             $"{north.ToString(System.Globalization.CultureInfo.InvariantCulture)}," +
+                             $"{east.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
+
+                // Запрос для городских дорог
+                string overpassQuery = $"[out:json][timeout:30];" +
+                                     $"(" +
+                                     $"way[\"highway\"~\"tertiary|unclassified|residential|service\"]({bbox});" +
+                                     $");" +
+                                     $"out center geom;";
+
+                var response = await ExecuteOverpassQueryAsync(overpassQuery);
+                if (!string.IsNullOrEmpty(response))
+                {
                     var json = JObject.Parse(response);
                     var elements = (JArray)json["elements"];
 
@@ -198,86 +262,229 @@ namespace Possible_routes_of_missing_people
                     {
                         foreach (var element in elements)
                         {
-                            var highway = ParseHighwayElement(element, center);
-                            if (highway != null)
+                            var road = ParseRoadElement(element, center, "major_road");
+                            if (road != null && road.Distance <= radiusMeters * 1.3)
                             {
-                                highways.Add(highway);
+                                roads.Add(road);
                             }
                         }
                     }
                 }
-                catch
-                {
-                    return highways;
-                }
             }
-            catch
+            catch (Exception ex)
             {
-                // Игнорируем ошибки
+                Console.WriteLine($"Ошибка при поиске городских дорог: {ex.Message}");
             }
 
-            return highways;
+            return roads;
+        }
+
+        /// <summary>
+        /// Ищет пешеходные дорожки и тропы
+        /// </summary>
+        private async Task<List<MapObject>> GetNearbyPedestrianRoadsAsync(PointLatLng center, int radiusMeters)
+        {
+            var roads = new List<MapObject>();
+            int searchRadius = CalculateAdjustedSearchRadius(radiusMeters, false);
+
+            try
+            {
+                double latOffset = searchRadius / 111120.0;
+                double lngOffset = searchRadius / (111120.0 * Math.Cos(center.Lat * Math.PI / 180));
+
+                var south = center.Lat - latOffset;
+                var north = center.Lat + latOffset;
+                var west = center.Lng - lngOffset;
+                var east = center.Lng + lngOffset;
+
+                string bbox = $"{south.ToString(System.Globalization.CultureInfo.InvariantCulture)}," +
+                             $"{west.ToString(System.Globalization.CultureInfo.InvariantCulture)}," +
+                             $"{north.ToString(System.Globalization.CultureInfo.InvariantCulture)}," +
+                             $"{east.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
+
+                // Запрос для пешеходных дорожек
+                string overpassQuery = $"[out:json][timeout:25];" +
+                                     $"(" +
+                                     $"way[\"highway\"~\"footway|path|track|cycleway|pedestrian|steps\"]({bbox});" +
+                                     $");" +
+                                     $"out center geom;";
+
+                var response = await ExecuteOverpassQueryAsync(overpassQuery);
+                if (!string.IsNullOrEmpty(response))
+                {
+                    var json = JObject.Parse(response);
+                    var elements = (JArray)json["elements"];
+
+                    if (elements != null)
+                    {
+                        foreach (var element in elements)
+                        {
+                            var road = ParseRoadElement(element, center, "road");
+                            if (road != null && road.Distance <= radiusMeters)
+                            {
+                                roads.Add(road);
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Ошибка при поиске пешеходных дорожек: {ex.Message}");
+            }
+
+            return roads;
+        }
+
+        /// <summary>
+        /// Выполняет запрос к Overpass API
+        /// </summary>
+        private async Task<string> ExecuteOverpassQueryAsync(string query)
+        {
+            try
+            {
+                var server = "https://overpass-api.de/api/interpreter";
+                var url = $"{server}?data={Uri.EscapeDataString(query)}";
+
+                // Логируем короткую версию запроса для отладки
+                Console.WriteLine($"Запрос: {query.Substring(0, Math.Min(100, query.Length))}...");
+
+                var response = await _httpClient.GetStringAsync(url);
+
+                if (string.IsNullOrEmpty(response) || response.Contains("error"))
+                {
+                    Console.WriteLine("Пустой ответ или ошибка от Overpass API");
+                    return null;
+                }
+
+                return response;
+            }
+            catch (HttpRequestException httpEx)
+            {
+                Console.WriteLine($"HTTP ошибка при запросе: {httpEx.Message}");
+                return null;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Ошибка при выполнении запроса: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Рассчитывает скорректированный радиус поиска
+        /// </summary>
+        private int CalculateAdjustedSearchRadius(int baseRadius, bool isForRoads)
+        {
+            if (isForRoads)
+            {
+                // Для дорог увеличиваем радиус поиска
+                return Math.Min(baseRadius * 2, 5000);
+            }
+            else
+            {
+                // Для природных объектов используем обычный радиус
+                return Math.Min(baseRadius, 3000);
+            }
         }
 
         /// <summary>
         /// Парсит элемент дороги
         /// </summary>
-        private MapObject ParseHighwayElement(JToken element, PointLatLng center)
+        private MapObject ParseRoadElement(JToken element, PointLatLng center, string defaultType)
         {
-            var type = element["type"]?.ToString();
-            var id = element["id"]?.ToString();
-
-            if (string.IsNullOrEmpty(id)) return null;
-
-            double lat = 0, lon = 0;
-
-            if (type == "node")
+            try
             {
-                lat = (double?)element["lat"] ?? 0;
-                lon = (double?)element["lon"] ?? 0;
-            }
-            else if (type == "way")
-            {
+                var type = element["type"]?.ToString();
+                var id = element["id"]?.ToString();
+
+                if (string.IsNullOrEmpty(id)) return null;
+
+                double lat = 0, lon = 0;
+
+                // Получаем координаты центра дороги
                 var centerData = element["center"];
                 if (centerData != null)
                 {
                     lat = (double?)centerData["lat"] ?? 0;
                     lon = (double?)centerData["lon"] ?? 0;
                 }
+                else if (type == "node")
+                {
+                    lat = (double?)element["lat"] ?? 0;
+                    lon = (double?)element["lon"] ?? 0;
+                }
+                else
+                {
+                    // Если нет центра, используем первую точку из геометрии
+                    var geometry = element["geometry"] as JArray;
+                    if (geometry != null && geometry.Count > 0)
+                    {
+                        lat = (double?)geometry[0]["lat"] ?? 0;
+                        lon = (double?)geometry[0]["lon"] ?? 0;
+                    }
+                    else
+                    {
+                        return null;
+                    }
+                }
+
+                if (lat == 0 || lon == 0) return null;
+
+                var location = new PointLatLng(lat, lon);
+                var distance = CalculateDistance(center, location);
+
+                // Получаем информацию о дороге
+                var tags = element["tags"] as JObject;
+                string name = "Дорога";
+                string roadType = defaultType;
+                string highwayType = "road";
+
+                if (tags != null)
+                {
+                    highwayType = tags["highway"]?.ToString() ?? "road";
+
+                    name = tags["name"]?.ToString() ??
+                           tags["ref"]?.ToString() ??
+                           GetHighwayTypeName(highwayType) ??
+                           "Дорога";
+
+                    // Определяем тип для стилизации
+                    if (highwayType == "motorway" || highwayType == "trunk" ||
+                        highwayType == "primary" || highwayType == "secondary")
+                    {
+                        roadType = "highway";
+                    }
+                    else if (highwayType == "tertiary" || highwayType == "unclassified" ||
+                             highwayType == "residential")
+                    {
+                        roadType = "major_road";
+                    }
+                    else
+                    {
+                        roadType = "minor_road";
+                    }
+                }
+
+                // Сокращаем длинное название
+                if (name.Length > 25)
+                    name = name.Substring(0, 22) + "...";
+
+                return new MapObject
+                {
+                    Name = name,
+                    Type = roadType,
+                    Location = location,
+                    Distance = Math.Round(distance),
+                    OSMId = $"{type}_{id}",
+                    HighwayType = highwayType
+                };
             }
-
-            if (lat == 0 || lon == 0) return null;
-
-            var location = new PointLatLng(lat, lon);
-            var distance = CalculateDistance(center, location);
-
-            // Получаем информацию о дороге
-            var tags = element["tags"] as JObject;
-            string name = "Дорога";
-            string roadType = "road";
-
-            if (tags != null)
+            catch (Exception ex)
             {
-                name = tags["name"]?.ToString() ??
-                       tags["ref"]?.ToString() ??
-                       GetHighwayTypeName(tags["highway"]?.ToString()) ??
-                       "Дорога";
-
-                roadType = "highway"; // Для стилизации основных дорог
+                Console.WriteLine($"Ошибка парсинга элемента дороги: {ex.Message}");
+                return null;
             }
-
-            // Сокращаем длинное название
-            if (name.Length > 25)
-                name = name.Substring(0, 22) + "...";
-
-            return new MapObject
-            {
-                Name = name,
-                Type = roadType,
-                Location = location,
-                Distance = Math.Round(distance),
-                OSMId = $"highway_{id}"
-            };
         }
 
         /// <summary>
@@ -291,9 +498,16 @@ namespace Possible_routes_of_missing_people
                 "trunk" => "Магистраль",
                 "primary" => "Основная дорога",
                 "secondary" => "Вторичная дорога",
-                "tertiary" => "Третичная дорога",
+                "tertiary" => "Городская дорога",
                 "unclassified" => "Дорога",
                 "residential" => "Жилая улица",
+                "service" => "Сервисная дорога",
+                "footway" => "Пешеходная дорожка",
+                "path" => "Тропа",
+                "track" => "Грунтовая дорога",
+                "cycleway" => "Велосипедная дорожка",
+                "pedestrian" => "Пешеходная зона",
+                "steps" => "Лестница",
                 _ => "Дорога"
             };
         }
@@ -304,10 +518,7 @@ namespace Possible_routes_of_missing_people
         private async Task<List<MapObject>> GetNearbyObjectsAsync(PointLatLng center, int radiusMeters, string objectType)
         {
             var objects = new List<MapObject>();
-
-            Console.WriteLine($"Поиск: {objectType}");
-
-            int searchRadius = Math.Min(radiusMeters, 3000);
+            int searchRadius = CalculateAdjustedSearchRadius(radiusMeters, false);
 
             try
             {
@@ -326,18 +537,9 @@ namespace Possible_routes_of_missing_people
                     return objects;
                 }
 
-                var server = "https://overpass-api.de/api/interpreter";
-
-                try
+                var response = await ExecuteOverpassQueryAsync(overpassQuery);
+                if (!string.IsNullOrEmpty(response))
                 {
-                    var url = $"{server}?data={Uri.EscapeDataString(overpassQuery)}";
-                    var response = await _httpClient.GetStringAsync(url);
-
-                    if (string.IsNullOrEmpty(response) || response.Contains("error"))
-                    {
-                        return objects;
-                    }
-
                     var json = JObject.Parse(response);
                     var elements = (JArray)json["elements"];
 
@@ -346,21 +548,17 @@ namespace Possible_routes_of_missing_people
                         foreach (var element in elements)
                         {
                             var obj = ParseOSMElement(element, center, objectType);
-                            if (obj != null)
+                            if (obj != null && obj.Distance <= radiusMeters)
                             {
                                 objects.Add(obj);
                             }
                         }
                     }
                 }
-                catch
-                {
-                    return objects;
-                }
             }
-            catch
+            catch (Exception ex)
             {
-                // Игнорируем ошибки
+                Console.WriteLine($"Ошибка при поиске объектов типа {objectType}: {ex.Message}");
             }
 
             return objects;
@@ -378,44 +576,38 @@ namespace Possible_routes_of_missing_people
 
             return objectType switch
             {
-                "river" => $"[out:json];" +
+                "river" => $"[out:json][timeout:25];" +
                           $"(" +
                           $"way[\"waterway\"~\"river|stream|brook|canal\"]({bbox});" +
                           $");" +
-                          $"out center;",
+                          $"out center geom;",
 
-                "water" => $"[out:json];" +
+                "water" => $"[out:json][timeout:25];" +
                           $"(" +
                           $"way[\"natural\"=\"water\"]({bbox});" +
                           $"way[\"water\"]({bbox});" +
                           $");" +
-                          $"out center;",
+                          $"out center geom;",
 
-                "wetland" => $"[out:json];" +
+                "wetland" => $"[out:json][timeout:25];" +
                             $"(" +
                             $"way[\"natural\"~\"wetland|marsh|swamp|bog\"]({bbox});" +
                             $");" +
-                            $"out center;",
+                            $"out center geom;",
 
-                "meadow" => $"[out:json];" +
+                "meadow" => $"[out:json][timeout:25];" +
                            $"(" +
                            $"way[\"natural\"=\"grassland\"]({bbox});" +
                            $"way[\"landuse\"~\"meadow|grass|farmland|field\"]({bbox});" +
                            $");" +
-                           $"out center;",
+                           $"out center geom;",
 
-                "forest" => $"[out:json];" +
+                "forest" => $"[out:json][timeout:25];" +
                            $"(" +
                            $"way[\"natural\"~\"forest|wood\"]({bbox});" +
                            $"way[\"landuse\"=\"forest\"]({bbox});" +
                            $");" +
-                           $"out center;",
-
-                "road" => $"[out:json];" +
-                         $"(" +
-                         $"way[\"highway\"~\"path|track|footway|bridleway|cycleway\"]({bbox});" +
-                         $");" +
-                         $"out center;",
+                           $"out center geom;",
 
                 _ => string.Empty
             };
@@ -426,59 +618,188 @@ namespace Possible_routes_of_missing_people
         /// </summary>
         private MapObject ParseOSMElement(JToken element, PointLatLng center, string objectType)
         {
-            var type = element["type"]?.ToString();
-            var id = element["id"]?.ToString();
-
-            if (string.IsNullOrEmpty(id)) return null;
-
-            double lat = 0, lon = 0;
-
-            if (type == "node")
+            try
             {
-                lat = (double?)element["lat"] ?? 0;
-                lon = (double?)element["lon"] ?? 0;
-            }
-            else if (type == "way")
-            {
-                var centerData = element["center"];
-                if (centerData != null)
+                var type = element["type"]?.ToString();
+                var id = element["id"]?.ToString();
+
+                if (string.IsNullOrEmpty(id)) return null;
+
+                double lat = 0, lon = 0;
+
+                if (type == "node")
                 {
-                    lat = (double?)centerData["lat"] ?? 0;
-                    lon = (double?)centerData["lon"] ?? 0;
+                    lat = (double?)element["lat"] ?? 0;
+                    lon = (double?)element["lon"] ?? 0;
+                }
+                else if (type == "way")
+                {
+                    var centerData = element["center"];
+                    if (centerData != null)
+                    {
+                        lat = (double?)centerData["lat"] ?? 0;
+                        lon = (double?)centerData["lon"] ?? 0;
+                    }
+                    else
+                    {
+                        var geometry = element["geometry"] as JArray;
+                        if (geometry != null && geometry.Count > 0)
+                        {
+                            // Берем среднюю точку
+                            int middleIndex = geometry.Count / 2;
+                            lat = (double?)geometry[middleIndex]["lat"] ?? 0;
+                            lon = (double?)geometry[middleIndex]["lon"] ?? 0;
+                        }
+                    }
+                }
+
+                if (lat == 0 || lon == 0) return null;
+
+                var location = new PointLatLng(lat, lon);
+                var distance = CalculateDistance(center, location);
+
+                // Получаем название
+                var tags = element["tags"] as JObject;
+                string name = GetDefaultNameForType(objectType);
+
+                if (tags != null)
+                {
+                    name = tags["name"]?.ToString() ??
+                           tags["waterway"]?.ToString() ??
+                           tags["natural"]?.ToString() ??
+                           tags["landuse"]?.ToString() ??
+                           GetDefaultNameForType(objectType);
+                }
+
+                // Сокращаем длинное название
+                if (name.Length > 25)
+                    name = name.Substring(0, 22) + "...";
+
+                return new MapObject
+                {
+                    Name = name,
+                    Type = objectType,
+                    Location = location,
+                    Distance = Math.Round(distance),
+                    OSMId = $"{type}_{id}"
+                };
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Ошибка парсинга OSM элемента: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Возвращает название по умолчанию для типа объекта
+        /// </summary>
+        private string GetDefaultNameForType(string objectType)
+        {
+            return objectType switch
+            {
+                "river" => "Река/Ручей",
+                "water" => "Водоем",
+                "wetland" => "Болото",
+                "meadow" => "Луг/Поле",
+                "forest" => "Лес",
+                "road" => "Тропа",
+                _ => "Объект"
+            };
+        }
+
+        /// <summary>
+        /// Обрабатывает и фильтрует объекты
+        /// </summary>
+        private List<MapObject> ProcessAndFilterObjects(List<MapObject> allObjects, int radiusMeters, int maxObjectsPerType)
+        {
+            if (allObjects.Count == 0)
+                return new List<MapObject>();
+
+            Console.WriteLine($"\n--- Фильтрация объектов ---");
+            Console.WriteLine($"Всего объектов до фильтрации: {allObjects.Count}");
+
+            // 1. Удаляем явные дубликаты (одинаковые координаты и тип)
+            var uniqueObjects = allObjects
+                .GroupBy(o => new { o.Type, Lat = Math.Round(o.Location.Lat, 5), Lng = Math.Round(o.Location.Lng, 5) })
+                .Select(g => g.OrderBy(o => o.Distance).First())
+                .ToList();
+
+            Console.WriteLine($"После удаления дубликатов: {uniqueObjects.Count}");
+
+            // 2. Фильтруем по расстоянию с разными порогами для разных типов
+            var filteredByDistance = uniqueObjects
+                .Where(o =>
+                {
+                    var maxDistance = o.Type switch
+                    {
+                        "highway" => radiusMeters * 2.0,      // Основные дороги дальше
+                        "major_road" => radiusMeters * 1.5,   // Городские дороги
+                        "minor_road" => radiusMeters * 1.3,   // Второстепенные дороги
+                        "road" => radiusMeters * 1.2,         // Пешеходные дорожки
+                        _ => radiusMeters                     // Природные объекты
+                    };
+                    return o.Distance <= maxDistance;
+                })
+                .ToList();
+
+            Console.WriteLine($"После фильтрации по расстоянию: {filteredByDistance.Count}");
+
+            // 3. Группируем по типу и берем ограниченное количество каждого типа
+            var groupedByType = filteredByDistance
+                .GroupBy(o => o.Type)
+                .OrderByDescending(g => GetPriority(g.Key));
+
+            var result = new List<MapObject>();
+
+            foreach (var group in groupedByType)
+            {
+                var objectsInGroup = group
+                    .OrderBy(o => o.Distance)
+                    .Take(maxObjectsPerType)
+                    .ToList();
+
+                result.AddRange(objectsInGroup);
+                Console.WriteLine($"  {group.Key}: {objectsInGroup.Count} объектов");
+            }
+
+            Console.WriteLine($"Итого отобрано объектов: {result.Count}");
+            return result;
+        }
+
+        /// <summary>
+        /// Получает приоритет для типа объекта
+        /// </summary>
+        private int GetPriority(string objectType)
+        {
+            if (_objectPriorities.ContainsKey(objectType))
+                return _objectPriorities[objectType];
+            return 0;
+        }
+
+        /// <summary>
+        /// Создает маркеры для объектов
+        /// </summary>
+        private void CreateMarkersForObjects(List<MapObject> objects, GMapOverlay overlay)
+        {
+            Console.WriteLine($"\n--- Создание маркеров ---");
+
+            // Сортируем объекты по приоритету и расстоянию
+            var sortedObjects = objects.OrderBy(o => GetPriority(o.Type)).ThenBy(o => o.Distance);
+
+            foreach (var obj in sortedObjects)
+            {
+                try
+                {
+                    var marker = CreateMarkerForObject(obj);
+                    overlay.Markers.Add(marker);
+                    Console.WriteLine($"  Добавлен: {obj.Type} - '{obj.Name}' ({obj.Distance:F0} м)");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"  Ошибка создания маркера для {obj.Name}: {ex.Message}");
                 }
             }
-
-            if (lat == 0 || lon == 0) return null;
-
-            var location = new PointLatLng(lat, lon);
-            var distance = CalculateDistance(center, location);
-
-            // Получаем название
-            var tags = element["tags"] as JObject;
-            string name = "Без названия";
-
-            if (tags != null)
-            {
-                name = tags["name"]?.ToString() ??
-                       tags["waterway"]?.ToString() ??
-                       tags["natural"]?.ToString() ??
-                       tags["landuse"]?.ToString() ??
-                       tags["highway"]?.ToString() ??
-                       "Без названия";
-            }
-
-            // Сокращаем длинное название
-            if (name.Length > 25)
-                name = name.Substring(0, 22) + "...";
-
-            return new MapObject
-            {
-                Name = name,
-                Type = objectType,
-                Location = location,
-                Distance = Math.Round(distance),
-                OSMId = $"{type}_{id}"
-            };
         }
 
         /// <summary>
@@ -502,11 +823,17 @@ namespace Possible_routes_of_missing_people
                 "meadow" => "Луг/Поле",
                 "forest" => "Лес",
                 "road" => "Тропа/Дорожка",
-                "highway" => "Дорога",
+                "highway" => "Основная дорога",
+                "major_road" => "Городская дорога",
+                "minor_road" => "Дорога",
                 _ => "Объект"
             };
 
-            marker.ToolTipText = $"{typeName}\n" +
+            string highwayInfo = !string.IsNullOrEmpty(mapObject.HighwayType) && mapObject.Type.Contains("road")
+                ? $"\nТип: {GetHighwayTypeName(mapObject.HighwayType)}"
+                : "";
+
+            marker.ToolTipText = $"{typeName}{highwayInfo}\n" +
                                $"{mapObject.Name}\n" +
                                $"Расстояние: {mapObject.Distance:F0} м";
 
@@ -536,6 +863,29 @@ namespace Possible_routes_of_missing_people
             foreach (var (direction, angle, markerType) in directions)
             {
                 var location = CalculateDestination(center, angle, radiusMeters * 0.6);
+                var marker = new GMarkerGoogle(location, markerType);
+                marker.ToolTipText = $"Направление: {direction}";
+                overlay.Markers.Add(marker);
+            }
+        }
+
+        /// <summary>
+        /// Добавляет дополнительные ориентиры
+        /// </summary>
+        private void AddAdditionalOrientationMarkers(PointLatLng center, int radiusMeters, GMapOverlay overlay)
+        {
+            // Добавляем промежуточные направления
+            var intermediateDirections = new[]
+            {
+                ("С-В", Math.PI / 4, GMarkerGoogleType.green_small),
+                ("Ю-В", 3 * Math.PI / 4, GMarkerGoogleType.green_small),
+                ("Ю-З", 5 * Math.PI / 4, GMarkerGoogleType.green_small),
+                ("С-З", 7 * Math.PI / 4, GMarkerGoogleType.green_small)
+            };
+
+            foreach (var (direction, angle, markerType) in intermediateDirections)
+            {
+                var location = CalculateDestination(center, angle, radiusMeters * 0.4);
                 var marker = new GMarkerGoogle(location, markerType);
                 marker.ToolTipText = $"Направление: {direction}";
                 overlay.Markers.Add(marker);
