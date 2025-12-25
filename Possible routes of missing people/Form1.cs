@@ -269,39 +269,39 @@ namespace Possible_routes_of_missing_people
             {
                 Cursor = Cursors.WaitCursor;
 
-                // Получаем overlay с объектами
+                // Получаем overlay с объектами (в виде полигонов)
                 var objectsOverlay = await routeFinder.FindObjectsInRadiusAsync(
                     startPoint,
                     areaCalculator.GetRadiusInMeters(),
                     7); // Увеличил количество объектов для города
 
                 // Добавляем новый overlay с объектами
-                if (objectsOverlay != null && objectsOverlay.Markers.Count > 0)
+                if (objectsOverlay != null && objectsOverlay.Polygons.Count > 0) // <--- Проверяем Polygons, а не Markers
                 {
                     gMapControl1.Overlays.Add(objectsOverlay);
-
-                    // Обновляем отображение
                     gMapControl1.Refresh();
+                    Console.WriteLine($" Найдено и отображено зон (полигонов): {objectsOverlay.Polygons.Count}");
 
-                    Console.WriteLine($"Найдено объектов: {objectsOverlay.Markers.Count}");
-
-                    // Показываем информацию только если объектов мало
-                    if (objectsOverlay.Markers.Count < 3)
+                    // Показываем информацию только если объектов (зон) мало
+                    if (objectsOverlay.Polygons.Count < 3)
                     {
-                        MessageBox.Show($"Найдено объектов: {objectsOverlay.Markers.Count}\n" +
+                        MessageBox.Show($"Найдено зон (полигонов): {objectsOverlay.Polygons.Count}\n" +
                                       "Попробуйте увеличить радиус поиска или выбрать другую точку.",
-                                      "Результат поиска",
+                                      " Результат поиска ",
                                       MessageBoxButtons.OK,
                                       MessageBoxIcon.Information);
                     }
                 }
                 else
                 {
+                    // Добавляем это сообщение, если overlay == null или Polygons.Count == 0
+                    Console.WriteLine("В указанном радиусе не найдено объектов (зоны не созданы).");
                     MessageBox.Show("В указанном радиусе не найдено объектов.\n" +
                                   "Попробуйте:\n" +
                                   "1. Увеличить радиус поиска\n" +
                                   "2. Кликнуть в районе с дорогами или водоемами\n" +
-                                  "3. Проверить интернет-соединение",
+                                  "3. Проверить интернет-соединение\n" +
+                                  "4. Программа могла отфильтровать слишком много объектов.",
                                   "Информация",
                                   MessageBoxButtons.OK,
                                   MessageBoxIcon.Information);
@@ -311,8 +311,8 @@ namespace Possible_routes_of_missing_people
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Ошибка при поиске объектов: {ex.Message}");
-                MessageBox.Show($"Ошибка при поиске объектов: {ex.Message}\n" +
+                Console.WriteLine($" Ошибка при поиске объектов: {ex.Message}");
+                MessageBox.Show($" Ошибка при поиске объектов: {ex.Message}\n" +
                               "Проверьте интернет-соединение.",
                               "Ошибка",
                               MessageBoxButtons.OK,
